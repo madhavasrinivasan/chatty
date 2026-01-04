@@ -17,13 +17,13 @@ class Services():
         )
 
         run_cfg = CrawlerRunConfig(
-            wait_for="body",                 # wait for DOM
-            wait_for_timeout=8000,           # 8 seconds max
-            delay_before_return_html=1.0,    # small buffer
-            wait_for_images=False,           # 🚀 IMPORTANT
-            scan_full_page=False,            # 🚀 IMPORTANT
+            wait_for="body",                
+            wait_for_timeout=8000,           
+            delay_before_return_html=1.0,   
+            wait_for_images=False,          
+            scan_full_page=False,            
             scroll_delay=0.3,
-            max_scroll_steps=3,              # prevent infinite scroll
+            max_scroll_steps=3,              
         )
 
         async with AsyncWebCrawler(config=browser_cfg) as crawler:
@@ -35,7 +35,7 @@ class Services():
         return results 
 
     @staticmethod
-    def documents_to_nodes(documents):
+    async def documents_to_nodes(documents):
             splitter = RecursiveCharacterTextSplitter(
                 chunk_size=800,
                 chunk_overlap=120
