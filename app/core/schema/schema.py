@@ -9,10 +9,11 @@ class LoginRequest(BaseModel):
 
 
 class RegisterRequest(BaseModel):
-    username:str
-    email:str 
-    password:str
-    confirm_passsowrd:str 
-    address:str
-    sunscription_id:Optional[int] = None
+    name: Optional[str] = None
+    username: str
+    email: str 
+    password: str
+    confirm_password: str 
+    address: Optional[str] = None
+    subscription_id: Optional[int] = None
 

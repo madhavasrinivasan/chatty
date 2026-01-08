@@ -1,11 +1,15 @@
 from app.core.services.webcrawler import Services 
-from fastapi import FastAPI,APIRouter, UploadFile, File, Form, Depends
+from fastapi import FastAPI,APIRouter, UploadFile, File, Form, Depends, Request
 from app.core.config.db import init_db, close_db
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn as uvicorn
 from app.admin.routes.index import approuter
+from app.core.schema.errorschema import register_exception_handlers
 
-app = FastAPI() 
+app = FastAPI()
+
+# Register exception handlers
+register_exception_handlers(app) 
 
 app.add_middleware(
     CORSMiddleware,

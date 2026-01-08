@@ -6,7 +6,6 @@ from fastapi import APIRouter
 approuter = APIRouter(
     prefix="/admin",
     tags=["admin"],
-    include_routers=[adminauthrouter, adminapprouter],
 ) 
 
 approuter.include_router(adminauthrouter);
