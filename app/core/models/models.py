@@ -20,6 +20,10 @@ class subscription_type(str, Enum):
     yearly = "yearly"
 
 
+class user_session_status(str, Enum):
+    active = "active"
+    inactive = "inactive"
+
 
 
 class users(models.Model):
@@ -157,4 +161,23 @@ class query_logs(models.Model):
             ("user_id",),
             ("chatbot_id",),
             ("created_at",),
+        ] 
+
+
+
+class user_sessions(models.Model):
+    id = fields.IntField(pk=True)
+
+    user_id = fields.IntField()
+    token = fields.LongCharField()
+    ip_address = fields.CharField(max_length=255)
+    status = fields.CharEnumField(user_session_status)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "user_sessions"
+        indexes = [
+            ("user_id"),
+            ("status"),
+            ("token"),
         ]

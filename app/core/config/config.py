@@ -14,7 +14,6 @@ class Settings(BaseSettings):
     # JWT
     jwt_secret: str
     jwt_algorithm: str = "HS256"
-    jwt_expire_minutes: int = 60
 
     # API Key
     api_key_header: str = "x-api-key"

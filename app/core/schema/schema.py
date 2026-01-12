@@ -15,5 +15,10 @@ class RegisterRequest(BaseModel):
     password: str
     confirm_password: str 
     address: Optional[str] = None
-    subscription_id: Optional[int] = None
+    subscription_id: Optional[int] = None 
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
 
