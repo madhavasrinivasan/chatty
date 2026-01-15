@@ -17,6 +17,7 @@ dependencies = [
     "llama-index>=0.14.12",
     "passlib[bcrypt]>=1.7.4",
     "pillow>=12.0.0",
+    "pycryptodome>=3.23.0",
     "pydantic-settings>=2.12.0",
     "python-jose>=3.5.0",
     "tortoise-orm[asyncpg]>=0.25.1",

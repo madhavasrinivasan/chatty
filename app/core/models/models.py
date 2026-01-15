@@ -169,7 +169,7 @@ class user_sessions(models.Model):
     id = fields.IntField(pk=True)
 
     user_id = fields.IntField()
-    token = fields.LongCharField()
+    token = fields.CharField(max_length=255)
     ip_address = fields.CharField(max_length=255)
     status = fields.CharEnumField(user_session_status)
     created_at = fields.DatetimeField(auto_now_add=True)

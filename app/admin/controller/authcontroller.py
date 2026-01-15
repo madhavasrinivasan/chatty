@@ -4,8 +4,11 @@ from app.core.schema.schema import RegisterRequest, LoginRequest
 from app.core.schema.schemarespone import APIResponse
 from app.core.schema.applicationerror import ApplicationError
 from app.core.services.jwt import JWTService
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
 import bcrypt
 import base64 
+import time
 
 
 class AuthController:
@@ -51,18 +54,35 @@ class AuthController:
             if not check_user:
                 raise ApplicationError.SomethingWentWrong("User not found")
             
-            passowrd_chek = bcrypt.checkpw(body.password.encode('utf-8'), check_user.password.encode('utf-8'));
+            stored_password_bytes = base64.b64decode(check_user.password)
+            passowrd_chek = bcrypt.checkpw(body.password.encode('utf-8'), stored_password_bytes);
             if not passowrd_chek:
                 raise ApplicationError.SomethingWentWrong("Invalid password") 
 
-            token = JWTService().generate_token({"user_id": check_user.id,"username": check_user.username,"email": check_user.email}) 
+            check_session = await AdminDbContoller().find_one_user_session(check_user.id) 
+
+
+            token = JWTService().generate_token({"user_id": check_user.id,"username": check_user.username,"email": check_user.email,"timestamp": time.time()}) 
+
+
 
             if not token or token == "":
                 raise ApplicationError.SomethingWentWrong("Failed to generate token")
-            
-            user_session = await AdminDbContoller().create_user_session(check_user.id, token, ip)
-            if not user_session or user_session == None or user_session.id == 0 or user_session.id == "":
-                raise ApplicationError.SomethingWentWrong("Failed to create user session")
+
+            if check_session and check_session.status == "active" and check_session != None and check_session.id != 0 and check_session.id != "":
+                destroy_session = await AdminDbContoller().destroy_user_session(check_session.token)
+                print(f"Destroyed user session: {destroy_session}")
+                if not destroy_session or destroy_session == None :
+                    raise ApplicationError.SomethingWentWrong("Failed to destroy user session")
+                user_session = await AdminDbContoller().create_user_session(check_user.id, token, ip)
+                if not user_session or user_session == None or user_session.id == 0 or user_session.id == "":
+                    raise ApplicationError.SomethingWentWrong("Failed to create user session") 
+
+
+            else:
+                user_session = await AdminDbContoller().create_user_session(check_user.id, token, ip)
+                if not user_session or user_session == None or user_session.id == 0 or user_session.id == "":
+                    raise ApplicationError.SomethingWentWrong("Failed to create user session")
             
             respose_data: dict = {
                 "token": token,
@@ -78,3 +98,17 @@ class AuthController:
             print(f"error logging in user: {e}")
             error_message = getattr(e, 'message', str(e))
             raise ApplicationError.SomethingWentWrong(error_message)
+
+
+    @staticmethod
+    async def logout_user(ip: str):
+        try:
+            return await AdminDbContoller().destroy_user_session(ip)
+        except Exception as e:
+            print(f"error logging out user: {e}")
+            error_message = getattr(e, 'message', str(e))
+            raise ApplicationError.SomethingWentWrong(error_message)
+
+
+
+

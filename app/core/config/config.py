@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     # API Key
     api_key_header: str = "x-api-key"
 
+    # AES
+    secret_key: str = Field(default="")
+
     # Rate limiting
     rate_limit_per_minute: int = 60
 
@@ -25,6 +28,7 @@ class Settings(BaseSettings):
         env_file = ".env"
         case_sensitive = False
         populate_by_name = True
+        extra = "ignore"  # Ignore extra fields like the typo 'secert_key'
 
 
 settings = Settings()

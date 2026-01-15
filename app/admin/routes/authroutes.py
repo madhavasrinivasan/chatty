@@ -1,4 +1,4 @@
-from fastapi import APIRouter 
+from fastapi import APIRouter, Request
 from app.core.schema.schemarespone import APIResponse
 from app.core.schema.schema import RegisterRequest , LoginRequest
 from app.admin.controller.authcontroller import AuthController
@@ -12,9 +12,12 @@ async def register(request: RegisterRequest):
     return await AuthController.register_user(request) 
 
 @adminauthrouter.post("/login", response_model=APIResponse)
-async def login(request: LoginRequest):
-    ip = request.client.host
-   
-    
-    return await AuthController.login_user(request, ip)
+async def login(body: LoginRequest, http_request: Request):
+    ip = http_request.headers.get("X-Forwarded-For") or (http_request.client.host if http_request.client else None)
+    return await AuthController.login_user(body, ip)
 
+
+@adminauthrouter.post("/logout", response_model=APIResponse)
+async def logout(http_request: Request):
+    ip = http_request.headers.get("X-Forwarded-For") or (http_request.client.host if http_request.client else None)
+    return await AuthController.logout_user(ip)
