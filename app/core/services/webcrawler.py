@@ -47,5 +47,25 @@ class Services():
 
             return nodes
 
+   
+    @staticmethod
+    async def embed_nodes_in_batches(nodes, embed_client, batch_size=16):
+        def batch(items, size):
+            for i in range(0, len(items), size):
+                yield items[i:i + size]
+
+        texts = [node.text for node in nodes]
+        embeddings = []
+        for text_batch in batch(texts, batch_size):
+            response = embed_client.embed(
+                texts=text_batch,
+                task_type="RETRIEVAL_DOCUMENT"
+            )
+            embeddings.extend(response)
+
+        for node, emb in zip(nodes, embeddings):
+            node.embedding = emb
+
+        return nodes
 
  

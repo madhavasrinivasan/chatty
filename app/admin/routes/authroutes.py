@@ -20,4 +20,4 @@ async def login(body: LoginRequest, http_request: Request):
 @adminauthrouter.post("/logout", response_model=APIResponse)
 async def logout(http_request: Request):
     ip = http_request.headers.get("X-Forwarded-For") or (http_request.client.host if http_request.client else None)
-    return await AuthController.logout_user(ip)
+    return await AuthController.logout_user(ip) 

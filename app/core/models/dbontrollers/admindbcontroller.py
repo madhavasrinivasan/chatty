@@ -1,6 +1,7 @@
 from app.core import models as Models
 from app.core.schema.applicationerror import ApplicationError
 from tortoise import connections
+from typing import List
 
 
 class AdminDbContoller:
@@ -78,3 +79,23 @@ class AdminDbContoller:
         except Exception as e:
             print(f"Error finding user by id: {e}")
             raise ApplicationError.InternalServerError("Cannot find user by id")
+
+    
+    async def create_chatbot(self, body: dict):
+        try:
+            return await self.models.chatbot_settings.create(
+                user_id=body["id"],
+            )
+        except Exception as e:
+            print(f"Error creating chatbot: {e}")
+            raise ApplicationError.InternalServerError("Cannot create chatbot")
+
+
+
+    async def add_assest(self, chatbot_id: int, files: List[dict]):
+        try:
+            return await self.models.user_assets.bulk_create(files)
+        
+        except Exception as e:
+            print(f"Error adding assest: {e}")
+            raise ApplicationError.InternalServerError("Cannot add assest")

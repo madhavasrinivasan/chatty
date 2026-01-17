@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     # API Key
     api_key_header: str = "x-api-key"
 
+    # File Upload
+    file_upload_directory_pdf: str = Field(default="Assets/PDF")
+    file_upload_max_size: int = Field(default=1024 * 1024 * 5) # 5MB
+
     # AES
     secret_key: str = Field(default="")
 

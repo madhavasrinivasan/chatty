@@ -25,6 +25,12 @@ class user_session_status(str, Enum):
     inactive = "inactive"
 
 
+class background_task_status(str, Enum):
+    pending = "pending"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
 
 class users(models.Model):
     id = fields.IntField(pk=True)
@@ -73,11 +79,10 @@ class chatbot_settings(models.Model):
 
 class user_assets(models.Model):
     id = fields.IntField(pk=True)
-
     asset_type = fields.CharEnumField(asset_type)
     user_id = fields.IntField()
     chatbot_id = fields.IntField()
-
+    name = fields.CharField(max_length=255)
     created_at = fields.DatetimeField(auto_now_add=True)
 
     class Meta:
@@ -180,4 +185,20 @@ class user_sessions(models.Model):
             ("user_id"),
             ("status"),
             ("token"),
+        ]
+
+
+class background_tasks(models.Model):
+    id = fields.IntField(pk=True)
+    chatbot_id = fields.IntField()
+    user_id = fields.IntField()
+    created_at = fields.DatetimeField(auto_now_add=True)
+    status = fields.CharEnumField(background_task_status)
+
+    class Meta:
+        table = "background_tasks"
+        indexes = [
+            ("chatbot_id",),
+            ("user_id",),
+            ("status",),
         ]
