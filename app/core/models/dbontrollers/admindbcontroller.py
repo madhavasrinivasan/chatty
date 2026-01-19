@@ -2,7 +2,7 @@ from app.core import models as Models
 from app.core.schema.applicationerror import ApplicationError
 from tortoise import connections
 from typing import List
-
+import uuid
 
 class AdminDbContoller:
     def __init__(self):
@@ -85,6 +85,7 @@ class AdminDbContoller:
         try:
             return await self.models.chatbot_settings.create(
                 user_id=body["id"],
+                api_key=str(uuid.uuid4()),
             )
         except Exception as e:
             print(f"Error creating chatbot: {e}")
@@ -94,8 +95,51 @@ class AdminDbContoller:
 
     async def add_assest(self, chatbot_id: int, files: List[dict]):
         try:
-            return await self.models.user_assets.bulk_create(files)
+            # Convert dictionaries to model instances
+            asset_instances = []
+            for file_dict in files:
+                # Convert string asset_type to enum
+                asset_type_str = file_dict["asset_type"]
+                asset_type_enum = self.models.asset_type(asset_type_str)
+                
+                asset_instances.append(
+                    self.models.user_assets(
+                        asset_type=asset_type_enum,
+                        user_id=file_dict["user_id"],
+                        chatbot_id=file_dict["chatbot_id"],
+                        name=file_dict["name"]
+                    )
+                )
+            return await self.models.user_assets.bulk_create(asset_instances)
         
         except Exception as e:
             print(f"Error adding assest: {e}")
             raise ApplicationError.InternalServerError("Cannot add assest")
+
+
+    async def bulk_insert_vectors(nodes):
+        values = []
+        placeholders = []
+
+        for i, node in enumerate(nodes):
+            placeholders.append(
+                f"(${i*6+1}, ${i*6+2}, ${i*6+3}, ${i*6+4}, ${i*6+5}, ${i*6+6})"
+            )
+
+            values.extend([
+                str(uuid.uuid4()),
+                node.metadata["chatbot_id"],
+                node.metadata["user_id"],
+                node.text,
+                json.dumps(node.metadata),
+                node.embedding
+            ])
+
+        sql = f"""
+        INSERT INTO vector_store
+        (id, user_id, chatbot_id, content, metadata, vector)
+        VALUES {", ".join(placeholders)}
+        """
+
+        conn = connections.get("default")
+        await conn.execute_query(sql, values)

@@ -3,7 +3,13 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from llama_index.core.node_parser import LangchainNodeParser
+from langchain_community.document_loaders import PyPDFLoader
+from datetime import datetime
+from google import genai
+from google.genai import types
+from app.core.config.config import settings
 
+client = genai.Client()
 
 
 class Services():
@@ -49,7 +55,7 @@ class Services():
 
    
     @staticmethod
-    async def embed_nodes_in_batches(nodes, embed_client, batch_size=16):
+    async def embed_nodes_in_batches(nodes,batch_size=16):
         def batch(items, size):
             for i in range(0, len(items), size):
                 yield items[i:i + size]
@@ -57,9 +63,10 @@ class Services():
         texts = [node.text for node in nodes]
         embeddings = []
         for text_batch in batch(texts, batch_size):
-            response = embed_client.embed(
-                texts=text_batch,
-                task_type="RETRIEVAL_DOCUMENT"
+            response = client.models.embed_content.embed(
+                model="gemini-embedding-001",
+                contents=text_batch,
+                config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT")
             )
             embeddings.extend(response)
 
@@ -68,4 +75,53 @@ class Services():
 
         return nodes
 
- 
+
+
+    @staticmethod
+    async def extract_pdf_pages_readable(pdf_path: str):
+        loader = PyPDFLoader(pdf_path)
+        docs = loader.load()
+         
+        pages = []
+
+        for doc in docs:
+            text = doc.page_content
+            meta = doc.metadata
+
+            if not text or not text.strip():
+                continue
+
+            pages.append({
+                "text": text,
+                "page_number": meta.get("page_label") or meta.get("page", 0) + 1,
+                "file_name": meta.get("source").split("/")[-1],
+                "total_pages": meta.get("total_pages"),
+            })
+     
+
+    @staticmethod
+    async def crawl_results_to_documents(results, base_metadata):
+        documents = []
+
+        for result in results:
+            if not result.markdown or not result.text:
+                continue
+
+
+            documents.append(
+                {
+                    "page_content": result.markdown,
+                    "metadata": {
+                        "source_type": "web",
+                        "url": result.url,                 
+                        "chatbot_id": base_metadata["chatbot_id"],
+                        "user_id": base_metadata["user_id"],
+                        "ingested_at": datetime.utcnow().isoformat()
+
+                    }
+                }
+            ) 
+
+
+
+        return documents

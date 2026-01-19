@@ -1,13 +1,18 @@
-from fastapi import APIRouter , Depends , Request,BackgroundTasks,Form
+from fastapi import APIRouter, Depends, Request, BackgroundTasks, Form, File, UploadFile
 from app.admin.controller.appcontroller import AppController
 from app.core.schema.schemarespone import APIResponse
 from app.core.services.filehandler import FileHandler
 from app.core.schema.schema import UploadKnowledgeBaseRequest
-from typing import List
+from typing import List, Optional
+
 adminapprouter = APIRouter(
     prefix="/app",
     tags=["app"],
 )
+
+async def get_uploaded_files(files: List[UploadFile] = File(...)):
+    file_handler = FileHandler()
+    return await file_handler.upload_file(files)
 
 @adminapprouter.get("/user", response_model=APIResponse)
 async def get_user(user: dict = Depends(AppController.validate_user)):
@@ -17,6 +22,17 @@ async def get_user(user: dict = Depends(AppController.validate_user)):
         data=user
     ) 
 
-@adminapprouter.post("/uploadknowlegdebase", response_model=APIResponse,)
-async def upload_files(user: dict = Depends(AppController.validate_user),file_path:List[dict] = Depends(FileHandler.upload_file),request: UploadKnowledgeBaseRequest = Depends(UploadKnowledgeBaseRequest.as_form)):
-    return await AppController.upload_knowledge_base(user,file_path,request)
+@adminapprouter.post("/uploadknowlegdebase", response_model=APIResponse)
+async def upload_files(
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(AppController.validate_user),
+    file_path: List[dict] = Depends(get_uploaded_files),
+    name: str = Form(...),
+    urls: Optional[str] = Form(None)
+): 
+    request = UploadKnowledgeBaseRequest.as_form(
+        chatbot_id=None,
+        name=name,
+        urls=urls
+    )
+    return await AppController.upload_knowledge_base(user, file_path, request, background_tasks)

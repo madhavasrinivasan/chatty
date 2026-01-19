@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # Rate limiting
     rate_limit_per_minute: int = 60
 
+    # Google GenAI
+    gemini_api_key: str
+
     class Config:
         env_file = ".env"
         case_sensitive = False
