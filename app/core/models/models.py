@@ -192,8 +192,12 @@ class background_tasks(models.Model):
     id = fields.IntField(pk=True)
     chatbot_id = fields.IntField()
     user_id = fields.IntField()
+    task_type = fields.CharField(max_length=50, default="create_vectors")
+    task_data = fields.JSONField(null=True)  # Store urls, files, etc.
+    status = fields.CharEnumField(background_task_status, default=background_task_status.pending)
+    error_message = fields.TextField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
-    status = fields.CharEnumField(background_task_status)
+    updated_at = fields.DatetimeField(auto_now=True)
 
     class Meta:
         table = "background_tasks"

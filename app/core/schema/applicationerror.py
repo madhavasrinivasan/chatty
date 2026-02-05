@@ -19,7 +19,7 @@ class ApplicationError(Exception):
     @classmethod
     def SomethingWentWrong(cls, resourse: str):
         return cls(
-            type="Something Went Wrong",
+             type="Something Went Wrong",
             message=resourse if resourse else "Something Went Wrong",
             status_code=400
         ) 
@@ -47,7 +47,7 @@ class ApplicationError(Exception):
             message=resourse if resourse else "NotFound",
             status_code=404
         ) 
-    
+
     @classmethod
     def BadRequest(cls, resourse: str):
         return cls(

@@ -1,8 +1,9 @@
 from app.core import models as Models
 from app.core.schema.applicationerror import ApplicationError
 from tortoise import connections
-from typing import List
+from typing import List, Dict
 import uuid
+import json
 
 class AdminDbContoller:
     def __init__(self):
@@ -116,6 +117,63 @@ class AdminDbContoller:
             print(f"Error adding assest: {e}")
             raise ApplicationError.InternalServerError("Cannot add assest")
 
+    async def create_background_task(self, chatbot_id: int, user_id: int, task_data: Dict):
+        try:
+            return await self.models.background_tasks.create(
+                chatbot_id=chatbot_id,
+                user_id=user_id,
+                task_type="create_vectors",
+                task_data=task_data,
+                status=self.models.background_task_status.pending
+            )
+        except Exception as e:
+            print(f"Error creating background task: {e}")
+            raise ApplicationError.InternalServerError("Cannot create background task")
+
+    async def get_pending_background_tasks(self):
+        try:
+            return await self.models.background_tasks.filter(
+                status=self.models.background_task_status.pending
+            ).limit(1).all()
+        except Exception as e:
+            print(f"Error getting pending tasks: {e}")
+            raise ApplicationError.InternalServerError("Cannot get pending tasks")
+
+    async def update_background_task_status(self, task_id: int, status: str, error_message: str = None):
+        try:
+            update_data = {"status": status}
+            if error_message:
+                update_data["error_message"] = error_message
+            return await self.models.background_tasks.filter(id=task_id).update(**update_data)
+        except Exception as e:
+            print(f"Error updating task status: {e}")
+            raise ApplicationError.InternalServerError("Cannot update task status")
+
+    async def create_vector_store(self, nodes):
+        values = []
+        placeholders = []
+
+        for i, node in enumerate(nodes):
+            placeholders.append(
+                f"(${i*5+1}, ${i*5+2}, ${i*5+3}, ${i*5+4}, ${i*5+5})"
+            )
+
+            values.extend([
+                node.metadata["user_id"],
+                node.metadata["chatbot_id"],
+                node.text,
+                json.dumps(node.metadata),
+                json.dumps(node.embedding)
+            ])
+
+        sql = f"""
+        INSERT INTO vector_store
+        (user_id, chatbot_id, content, metadata, vector)
+        VALUES {", ".join(placeholders)}
+        """
+
+        conn = connections.get("default")
+        await conn.execute_query(sql, values)
 
     async def bulk_insert_vectors(nodes):
         values = []
@@ -143,3 +201,37 @@ class AdminDbContoller:
 
         conn = connections.get("default")
         await conn.execute_query(sql, values)
+
+
+     
+    async def get_response(self, user_id: int, embedding: list[float]):
+        try:
+            vector_literal = '[' + ','.join(map(str, embedding)) + ']'
+            
+            sql = """
+                SELECT
+                    id,
+                    content,
+                    metadata,
+                    vector <=> $1::vector AS distance
+                FROM vector_store
+                WHERE user_id = $2
+                ORDER BY vector <=> $1::vector
+                LIMIT 5;
+            """
+
+            conn = connections.get("default")
+            rows = await conn.execute_query_dict(
+                sql,
+                [vector_literal, user_id]
+            )
+
+            return rows
+
+        except Exception as e:
+            print(f"Error getting response: {e}")
+            raise ApplicationError.InternalServerError("Cannot get response")
+
+
+
+    

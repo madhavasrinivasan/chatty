@@ -1,6 +1,6 @@
 from app.core.services.webcrawler import Services 
 from fastapi import FastAPI,APIRouter, UploadFile, File, Form, Depends, Request
-from app.core.config.db import init_db, close_db, init_redis, close_redis
+from app.core.config.db import init_db, close_db
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn as uvicorn
 from app.admin.routes.index import approuter
@@ -31,13 +31,12 @@ async def health():
 @app.on_event("startup")
 async def startup():
     await init_db()
-    init_redis()  # Redis init is synchronous, not async
 
     
 @app.on_event("shutdown")
 async def shutdown():
     await close_db()
-    close_redis()
+    # close_redis()
 
 
 if __name__ == "__main__":

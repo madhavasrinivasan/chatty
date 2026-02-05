@@ -1,6 +1,6 @@
 
 from pydantic import BaseModel, Field 
-from typing import Optional, List
+from typing import Optional, List ,Dict, Any
 from fastapi import Form
 import json
 
@@ -51,4 +51,12 @@ class UploadKnowledgeBaseRequest(BaseModel):
             chatbot_id=chatbot_id,
             name=name,
             urls=parsed_urls,
-        )
+        ) 
+
+
+class llmresponse(BaseModel):
+     response: str = Field(description="The response from the LLM in markdown format")
+     source : List[str]= Field(description="The source of the response") 
+
+class llmrequest(BaseModel):
+    question: str = Field(description="The question to ask the LLM")

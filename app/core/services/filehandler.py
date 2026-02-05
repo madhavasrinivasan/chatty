@@ -32,7 +32,7 @@ class FileHandler:
                     file_path = os.path.join(upload_dir, file_name)
                     async with aiofiles.open(file_path, "wb") as out_file:
                         while True:
-                            chunk = await file.read(1024 * 1024)
+                            chunk = await file.read(20 *1024 * 1024)
                             if not chunk:
                                 break
                             await out_file.write(chunk)

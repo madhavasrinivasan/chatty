@@ -3,6 +3,7 @@ from app.admin.controller.appcontroller import AppController
 from app.core.schema.schemarespone import APIResponse
 from app.core.services.filehandler import FileHandler
 from app.core.schema.schema import UploadKnowledgeBaseRequest
+from app.core.schema.schema import llmrequest , llmresponse
 from typing import List, Optional
 
 adminapprouter = APIRouter(
@@ -35,4 +36,8 @@ async def upload_files(
         name=name,
         urls=urls
     )
-    return await AppController.upload_knowledge_base(user, file_path, request, background_tasks)
+    return await AppController.upload_knowledge_base(user, file_path, request, background_tasks) 
+
+@adminapprouter.post("/response", response_model=APIResponse)
+async def get_response(request:llmrequest, user: dict = Depends(AppController.validate_user)):
+    return await AppController.get_response(user, request)
