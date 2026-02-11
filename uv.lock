@@ -556,7 +556,9 @@ dependencies = [
     { name = "langchain-community" },
     { name = "langchain-text-splitters" },
     { name = "llama-index" },
+    { name = "numpy" },
     { name = "passlib", extra = ["bcrypt"] },
+    { name = "pgvector" },
     { name = "pillow" },
     { name = "pycryptodome" },
     { name = "pydantic-settings" },
@@ -567,6 +569,7 @@ dependencies = [
     { name = "rq" },
     { name = "tortoise-orm", extra = ["asyncpg"] },
     { name = "uvicorn" },
+    { name = "yarl" },
 ]
 
 [package.metadata]
@@ -584,7 +587,9 @@ requires-dist = [
     { name = "langchain-community", specifier = ">=0.4.1" },
     { name = "langchain-text-splitters", specifier = ">=1.1.0" },
     { name = "llama-index", specifier = ">=0.14.12" },
+    { name = "numpy", specifier = ">=2.3.5" },
     { name = "passlib", extras = ["bcrypt"], specifier = ">=1.7.4" },
+    { name = "pgvector", specifier = ">=0.4.2" },
     { name = "pillow", specifier = ">=12.0.0" },
     { name = "pycryptodome", specifier = ">=3.23.0" },
     { name = "pydantic-settings", specifier = ">=2.12.0" },
@@ -595,6 +600,7 @@ requires-dist = [
     { name = "rq", specifier = ">=2.6.1" },
     { name = "tortoise-orm", extras = ["asyncpg"], specifier = ">=0.25.1" },
     { name = "uvicorn", specifier = ">=0.38.0" },
+    { name = "yarl", specifier = ">=1.22.0" },
 ]
 
 [[package]]
@@ -2414,6 +2420,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/11/4b/a43f86570cb72f732723c19ba71f1c02200ed1cc762d71daa2c35718a529/patchright-1.56.0-py3-none-win32.whl", hash = "sha256:5502899cd8764ccc7a18c3cb47a76e49b25ec4eae155ec5ebea9e5e0022cc811", size = 35623487, upload-time = "2025-11-11T18:59:36.156Z" },
     { url = "https://files.pythonhosted.org/packages/95/8d/37cc3127c6085ffa6482832a07f84587f2f04dbbaf194cc395bb2afa811c/patchright-1.56.0-py3-none-win_amd64.whl", hash = "sha256:0fe85d8f6b541689185115f3ce69e87a7f5dd964ec6aaeac635d4db5a906aec1", size = 35623491, upload-time = "2025-11-11T18:59:38.853Z" },
     { url = "https://files.pythonhosted.org/packages/c5/37/0b79ddfc6a2ba16e9f258670ea40a74c791d925f1847cf4ad0e739bc7506/patchright-1.56.0-py3-none-win_arm64.whl", hash = "sha256:8bbf1c753e7b07b889a3ff43109ce3cea457605ea6b0477e65af4d9a2c5585cf", size = 31232602, upload-time = "2025-11-11T18:59:41.537Z" },
+]
+
+[[package]]
+name = "pgvector"
+version = "0.4.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/25/6c/6d8b4b03b958c02fa8687ec6063c49d952a189f8c91ebbe51e877dfab8f7/pgvector-0.4.2.tar.gz", hash = "sha256:322cac0c1dc5d41c9ecf782bd9991b7966685dee3a00bc873631391ed949513a", size = 31354, upload-time = "2025-12-05T01:07:17.87Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5a/26/6cee8a1ce8c43625ec561aff19df07f9776b7525d9002c86bceb3e0ac970/pgvector-0.4.2-py3-none-any.whl", hash = "sha256:549d45f7a18593783d5eec609ea1684a724ba8405c4cb182a0b2b08aeff04e08", size = 27441, upload-time = "2025-12-05T01:07:16.536Z" },
 ]
 
 [[package]]

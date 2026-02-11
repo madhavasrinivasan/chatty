@@ -7,9 +7,12 @@ from app.core.schema.applicationerror import ApplicationError
 from fastapi import Request, BackgroundTasks
 from app.core.services.jwt import JWTService
 from Crypto.Cipher import AES
+from fastapi import Request
 from Crypto.Random import get_random_bytes
-from typing import List
+from typing import List, Optional
 from app.core.config import db as db_config
+from app.core.config.db import initialize_light_rag
+from lightrag import QueryParam
 from app.core.services.webcrawler import Services
 from app.core.config.config import settings
 import bcrypt
@@ -56,7 +59,7 @@ class  AppController:
 
     
     @staticmethod
-    async def upload_knowledge_base(user: dict, file_path: List[dict], request, background_tasks: BackgroundTasks = None):
+    async def upload_knowledge_base(user: dict, file_path: Optional[List[dict]], request, background_tasks: BackgroundTasks = None):
         try: 
              print(f"Uploading knowledge base for user: {user}")
              print(f"File path: {file_path}")
@@ -71,14 +74,15 @@ class  AppController:
 
              files:List[str] = []
 
-             for file in file_path:
-                file_dict:dict = {
-                    "asset_type": "pdf",
-                    "user_id": user["id"],
-                    "chatbot_id": chatbot.id,
-                    "name": file["file_name"],
-                }
-                files.append(file_dict) 
+             if file_path:
+                 for file in file_path:
+                    file_dict:dict = {
+                        "asset_type": "pdf",
+                        "user_id": user["id"],
+                        "chatbot_id": chatbot.id,
+                        "name": file["file_name"],
+                    }
+                    files.append(file_dict) 
 
             #  for url in request.urls:
             #     file_dict:dict = {
@@ -128,27 +132,23 @@ class  AppController:
     async def create_vectors_background_task(chatbot_id: int, urls: list, files: list, user_id: int):
         try:
             print(f"Creating vectors background task for chatbot: {chatbot_id}")
-            documents = []
+            documents: list = []
+
             # Process URLs
             if urls and len(urls) > 0:
                 crawl_results = await Services.crawlweb(urls)
-                print(f"Crawl results: {crawl_results}")
                 crawled_docs = await Services.crawl_results_to_documents(
                     crawl_results, {"chatbot_id": chatbot_id, "user_id": user_id}
                 )
                 documents.extend(crawled_docs)
 
-
-            # print(f"Documents: {documents}")
             # Process PDF files
             if files and len(files) > 0:
-               
                 for file_dict in files:
                     pdf_path = file_dict.get("name") if isinstance(file_dict, dict) else file_dict
-                    pdf_docs = await Services.extract_pdf_pages_readable(os.path.join(directory, pdf_path))
-                    print(f"PDF Docs: {pdf_docs}")
+                    full_pdf_path = os.path.join(directory, pdf_path)
+                    pdf_docs = await Services.extract_pdf_pages_readable(full_pdf_path)
                     for pdf_doc in pdf_docs:
-                        # Convert PDF doc format to match web doc format
                         doc = {
                             "page_content": pdf_doc["text"],
                             "metadata": {
@@ -162,40 +162,71 @@ class  AppController:
                         }
                         documents.append(doc)
 
+            if not documents:
+                print("No documents to insert into LightRAG")
+                return
 
-            nodes = await Services.documents_to_nodes(documents)
+            # Get LightRAG instance for this workspace (store_${chatbot_id})
+            # Background task has no Request; use initialize_light_rag directly (no app.state).
+            workspace_id = f"store_{chatbot_id}"
+            rag = await initialize_light_rag(store_id=workspace_id)
 
-            print(f"Nodes: {nodes}")
+            # Build list of text strings for LightRAG.ainsert
+            texts = []
+            for doc in documents:
+                content = doc.get("page_content", "") if isinstance(doc, dict) else getattr(doc, "page_content", "")
+                if content and content.strip():
+                    texts.append(content.strip())
 
-            embedded_nodes = await Services.embed_nodes_in_batches(nodes)
-
-            print(f"Embedded Nodes: {embedded_nodes}")
-
-            vector_store = await AdminDbContoller().create_vector_store(embedded_nodes);
+            if not texts:
+                print("No non-empty content to insert into LightRAG")
+                return
+            print(f"Texts: {texts}")
+            # Insert into LightRAG (chunking, embedding, graph storage handled by LightRAG)
+            track_id = await rag.ainsert(input=texts)
+            print(f"LightRAG insert completed for chatbot {chatbot_id}, track_id: {track_id}")
 
         except Exception as e:
             print(f"error creating vectors background task: {e}")
-            error_message = getattr(e, 'message', str(e))
+            error_message = getattr(e, "message", str(e))
             raise ApplicationError.SomethingWentWrong(error_message)  
 
 
 
     @staticmethod
+    async def ask_store(store_id: str, question: str, mode: str = "hybrid") -> str:
+        """
+        Query a specific store's knowledge base using LightRAG.
+        Modes: 'naive', 'local', 'global', 'hybrid'
+        """
+        rag = await initialize_light_rag(store_id=f"store_126")
+        response = await rag.aquery(
+            question,
+            param=QueryParam(
+                mode=mode,
+                top_k=20,
+            ),
+        )
+        return response
+
+    @staticmethod
     async def get_response(user: dict, request: llmrequest):
         try:
-            generated_embedding = await Services.generate_embedding(request.question)
-            print(f"Generated embedding: {generated_embedding}")
-            vector_store = await AdminDbContoller().get_response(user["id"], generated_embedding)
-            print(f"Vector store: {vector_store}")
-            response = await Services.generate_response(vector_store)
+            store_id = request.store_id or f"store_{user['id']}"
+            mode = request.mode or "hybrid"
+            response = await AppController.ask_store(
+                store_id=store_id,
+                question=request.question,
+                mode=mode,
+            )
             return APIResponse(
                 success=True,
                 message="Response fetched successfully",
-                data=response.parsed
+                data={"response": response}
             )
         except Exception as e:
             print(f"error getting response: {e}")
-            error_message = getattr(e, 'message', str(e))
+            error_message = getattr(e, "message", str(e))
             raise ApplicationError.SomethingWentWrong(error_message)
 
             

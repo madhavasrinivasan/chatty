@@ -1,6 +1,6 @@
 from google import genai
 
-client = genai.Client(api_key="AIzaSyCxSuSXj6PaJUECByGqcZQFCZ_7PNVc788")
+
 
 result = client.models.embed_content(
         model="gemini-embedding-001",

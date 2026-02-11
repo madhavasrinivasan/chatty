@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     # Rate limiting
     rate_limit_per_minute: int = 60
 
+    # Working Directory
+    lightrag_kv_storage: str = Field(default="PGKVStorage")
+    lightrag_doc_status_storage: str = Field(default="PGDocStatusStorage")
+    lightrag_graph_storage: str = Field(default="PGGraphStorage")
+    lightrag_vector_storage: str = Field(default="PGVectorStorage")
+
     # Google GenAI
     gemini_api_key: str
 

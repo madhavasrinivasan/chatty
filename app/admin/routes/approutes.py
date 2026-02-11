@@ -11,7 +11,9 @@ adminapprouter = APIRouter(
     tags=["app"],
 )
 
-async def get_uploaded_files(files: List[UploadFile] = File(...)):
+async def get_uploaded_files(files: Optional[List[UploadFile]] = File(None)):
+    if files is None or (isinstance(files, list) and len(files) == 0):
+        return None
     file_handler = FileHandler()
     return await file_handler.upload_file(files)
 
@@ -27,7 +29,7 @@ async def get_user(user: dict = Depends(AppController.validate_user)):
 async def upload_files(
     background_tasks: BackgroundTasks,
     user: dict = Depends(AppController.validate_user),
-    file_path: List[dict] = Depends(get_uploaded_files),
+    file_path: Optional[List[dict]] = Depends(get_uploaded_files),
     name: str = Form(...),
     urls: Optional[str] = Form(None)
 ): 

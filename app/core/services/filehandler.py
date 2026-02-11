@@ -25,26 +25,39 @@ class FileHandler:
             upload_dir = self.settings.file_upload_directory_pdf
             os.makedirs(upload_dir, exist_ok=True)
             
+            if not files:
+                return file_paths
+            
             for file in files:
-                file_name = file.filename
-                file_extension = mimetypes.guess_extension(file.content_type)
-                if file_extension == ".pdf" and file.size <= max_size:
-                    file_path = os.path.join(upload_dir, file_name)
-                    async with aiofiles.open(file_path, "wb") as out_file:
-                        while True:
-                            chunk = await file.read(20 *1024 * 1024)
-                            if not chunk:
-                                break
-                            await out_file.write(chunk)
+                if not file or not file.filename:
+                    continue
                     
-                    file_dict: dict = {
-                        "file_path": file_path,
-                        "file_name": file_name,
-                        "file_extension": file_extension,
-                    }
-                    file_paths.append(file_dict)
-                else:
-                    raise ApplicationError.BadRequest("Invalid file type or size")
+                file_name = file.filename
+                # Handle None content_type
+                content_type = file.content_type or ""
+                file_extension = mimetypes.guess_extension(content_type)
+                
+                # Check if file is PDF and size is valid
+                if file_extension != ".pdf":
+                    raise ApplicationError.BadRequest(f"Invalid file type. Only PDF files are allowed. File: {file_name}")
+                
+                if file.size > max_size:
+                    raise ApplicationError.BadRequest(f"File size exceeds maximum allowed size ({max_size} bytes). File: {file_name}")
+                
+                file_path = os.path.join(upload_dir, file_name)
+                async with aiofiles.open(file_path, "wb") as out_file:
+                    while True:
+                        chunk = await file.read(20 *1024 * 1024) # 20MB chunk size
+                        if not chunk:
+                            break
+                        await out_file.write(chunk)
+                
+                file_dict: dict = {
+                    "file_path": file_path,
+                    "file_name": file_name,
+                    "file_extension": file_extension,
+                }
+                file_paths.append(file_dict)
             return file_paths
         except Exception as e:
             print(f"error uploading file: {e}")

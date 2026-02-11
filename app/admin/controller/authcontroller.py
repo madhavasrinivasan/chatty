@@ -6,14 +6,17 @@ from app.core.schema.applicationerror import ApplicationError
 from app.core.services.jwt import JWTService
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
+from app.core.services.webcrawler import Services
+from fastapi import Request
 import bcrypt
 import base64 
 import time
+from app.core.config.db import initialize_light_rag
 
 
 class AuthController:
     @staticmethod
-    async def register_user(body: RegisterRequest):
+    async def register_user(body: RegisterRequest, request: Request):
         try: 
             check_user = await AdminDbContoller().find_one_user(body.model_dump())
             if check_user:
@@ -25,8 +28,12 @@ class AuthController:
             user_data = body.model_dump(exclude={"confirm_password"})
            
             user_data["password"] = base64.b64encode(hashed_password).decode('utf-8')
-            data = await AdminDbContoller().create_user(user_data)
+            data = await AdminDbContoller().create_user(user_data) 
 
+            new_rag = await Services.get_light_rag_for_store(request=request, store_id=str(data.id))
+            if not new_rag:
+                raise ApplicationError.SomethingWentWrong("Failed to create light rag")
+            
             user_dict = {
                 "id": data.id,
                 "name": data.name,

@@ -1,0 +1,14 @@
+
+services:
+  postgres-vector:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: lightrag
+      POSTGRES_USER: lightrag
+      POSTGRES_PASSWORD: ""
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+volumes:
+  pgdata:

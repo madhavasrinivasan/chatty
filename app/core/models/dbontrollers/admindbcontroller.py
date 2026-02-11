@@ -158,12 +158,15 @@ class AdminDbContoller:
                 f"(${i*5+1}, ${i*5+2}, ${i*5+3}, ${i*5+4}, ${i*5+5})"
             )
 
+            # Get embedding from metadata (stored there since Document objects don't allow arbitrary attributes)
+            embedding = node.metadata.pop("embedding", [])
+            
             values.extend([
                 node.metadata["user_id"],
                 node.metadata["chatbot_id"],
-                node.text,
+                node.page_content,  # Langchain Document uses .page_content, not .text
                 json.dumps(node.metadata),
-                json.dumps(node.embedding)
+                json.dumps(embedding)
             ])
 
         sql = f"""
@@ -184,13 +187,16 @@ class AdminDbContoller:
                 f"(${i*6+1}, ${i*6+2}, ${i*6+3}, ${i*6+4}, ${i*6+5}, ${i*6+6})"
             )
 
+            # Get embedding from metadata (stored there since Document objects don't allow arbitrary attributes)
+            embedding = node.metadata.pop("embedding", [])
+            
             values.extend([
                 str(uuid.uuid4()),
                 node.metadata["chatbot_id"],
                 node.metadata["user_id"],
-                node.text,
+                node.page_content,  # Langchain Document uses .page_content, not .text
                 json.dumps(node.metadata),
-                node.embedding
+                embedding
             ])
 
         sql = f"""
@@ -206,28 +212,22 @@ class AdminDbContoller:
      
     async def get_response(self, user_id: int, embedding: list[float]):
         try:
-            vector_literal = '[' + ','.join(map(str, embedding)) + ']'
+            # Convert to JSON string - Tortoise handles this
+            vector_json = json.dumps(embedding)
             
             sql = """
-                SELECT
-                    id,
-                    content,
-                    metadata,
-                    vector <=> $1::vector AS distance
+                SELECT id, content, metadata,
+                       vector <=> $1::vector AS distance
                 FROM vector_store
-                WHERE user_id = $2
-                ORDER BY vector <=> $1::vector
-                LIMIT 5;
+                WHERE user_id = $2 
+                  AND vector <=> $1::vector < 0.5
+                ORDER BY vector <=> $1::vector ASC
+                LIMIT 20;
             """
-
+            
             conn = connections.get("default")
-            rows = await conn.execute_query_dict(
-                sql,
-                [vector_literal, user_id]
-            )
-
+            rows = await conn.execute_query_dict(sql, [vector_json, user_id])
             return rows
-
         except Exception as e:
             print(f"Error getting response: {e}")
             raise ApplicationError.InternalServerError("Cannot get response")

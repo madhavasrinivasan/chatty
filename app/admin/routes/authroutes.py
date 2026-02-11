@@ -8,8 +8,8 @@ adminauthrouter = APIRouter(
 )
 
 @adminauthrouter.post("/register", response_model=APIResponse)
-async def register(request: RegisterRequest):
-    return await AuthController.register_user(request) 
+async def register(body: RegisterRequest, http_request: Request):
+    return await AuthController.register_user(body, http_request) 
 
 @adminauthrouter.post("/login", response_model=APIResponse)
 async def login(body: LoginRequest, http_request: Request):
