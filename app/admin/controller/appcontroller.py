@@ -21,6 +21,7 @@ import base64
 import time
 import os
 from datetime import datetime, timedelta, timezone
+import shopify
 import jwt
 import httpx
 import json
@@ -204,7 +205,78 @@ class  AppController:
             print(f"error creating vectors background task: {e}")
             error_message = getattr(e, "message", str(e))
             raise ApplicationError.SomethingWentWrong(error_message)  
+   
 
+
+    @staticmethod
+    @staticmethod
+    async def get_products_background_task(chatbot_id: int, store_id: int):
+        try:
+            print(f"Getting products background task for chatbot: {chatbot_id}")
+
+            # find_one_ecom_store looks up by user_id (param name is store_id for legacy reasons)
+            shop_details = await AdminDbContoller().find_one_ecom_store(store_id=store_id)
+            if not shop_details or shop_details is None:
+                raise ApplicationError.SomethingWentWrong("Cannot find shopify store")
+
+            store_name = shop_details.store_name or ""
+            access_token = shop_details.access_token or ""
+            if not store_name.strip() or not access_token:
+                raise ApplicationError.SomethingWentWrong(
+                    "Shopify store has no store name or access token; complete OAuth first."
+                )
+
+            session = shopify.Session(store_name.strip(), "2024-04", access_token)
+            shopify.ShopifyResource.activate_session(session)
+
+            try:
+                shop = shopify.Shop.current()
+                print(f"✅ Success! Connected to shop: {shop.name}")
+                print(f"Currency: {shop.currency}")
+
+                products = shopify.Product.find()
+                for product in products:
+                    print("------------------------------------------------")
+                    print(f"📦 Product: {product.title}")
+                    print(f"🆔 ID: {product.id}")
+                    product_data = product.to_dict()
+                    print(json.dumps(product_data, indent=4, default=str))
+
+                    # --- GET DESCRIPTION ---
+                    description = getattr(product, 'body_html', None) or ""
+                    desc_preview = (description[:50] + "...") if len(description) > 50 else description or "No description"
+                    print(f"📝 Description: {desc_preview}")
+
+                    # --- GET VARIANTS (Price, Stock, Options) ---
+                    if product.variants:
+                        print(f"🗂️ Variants ({len(product.variants)}):")
+                        for variant in product.variants:
+                            print(f"   - {getattr(variant, 'title', None) or 'N/A'}")
+                            print(f"     💰 Price: {getattr(variant, 'price', None) or 'N/A'}")
+                            print(f"     📦 Stock: {getattr(variant, 'inventory_quantity', None) or 0}")
+                            print(f"     🏷️ SKU: {getattr(variant, 'sku', None) or 'N/A'}")
+
+                    # --- GET METAFIELDS ---
+                    try:
+                        metafields = product.metafields()
+                        if metafields:
+                            print(f"🔑 Metafields ({len(metafields)}):")
+                            for meta in metafields:
+                                print(f"   - {meta.namespace}.{meta.key}: {meta.value}")
+                    except Exception as e:
+                        print(f"   ⚠️ Could not fetch metafields: {e}")
+
+            except Exception as e:
+                print(f"error getting products background task: {e}")
+                error_message = getattr(e, "message", str(e))
+                raise ApplicationError.SomethingWentWrong(error_message)
+            finally:
+                shopify.ShopifyResource.clear_session()
+
+        except Exception as e:
+            print(f"error in get_products_background_task: {e}")
+            error_message = getattr(e, "message", str(e))
+            raise ApplicationError.SomethingWentWrong(error_message)
 
 
     @staticmethod
@@ -325,6 +397,14 @@ class  AppController:
                     refresh_token=refresh_token,
                     expires_at=expires_at,
                     store_type="shopify"
+                ) 
+
+                await AdminDbContoller().create_background_task(
+                    user_id=1,
+                    chatbot_id=1,
+                    task_type="get_products",
+                    task_data=None,
+                    # status="pending"
                 )
 
             return APIResponse(

@@ -1,4 +1,5 @@
 from tortoise import Tortoise
+from tortoise.connection import connections
 from app.core.config.config import settings
 from lightrag import LightRAG, QueryParam
 from lightrag.llm.gemini import gemini_model_complete , gemini_embed
@@ -30,6 +31,35 @@ async def init_db():
 
     if settings.env == "development":
         await Tortoise.generate_schemas(safe=True)
+        await _upgrade_store_knowledge_vector_search()
+
+
+async def _upgrade_store_knowledge_vector_search():
+    """Add pgvector embedding and tsvector full-text search to store_knowledge (run after generate_schemas)."""
+    try:
+        conn = connections.get("default")
+        await conn.execute_query("CREATE EXTENSION IF NOT EXISTS vector;")
+        await conn.execute_query("""
+            ALTER TABLE store_knowledge
+            ADD COLUMN IF NOT EXISTS embedding vector(768);
+        """)
+        await conn.execute_query("""
+            ALTER TABLE store_knowledge
+            ADD COLUMN IF NOT EXISTS content_tsv tsvector
+            GENERATED ALWAYS AS (to_tsvector('english', coalesce(content, ''))) STORED;
+        """)
+        await conn.execute_query("""
+            CREATE INDEX IF NOT EXISTS idx_store_knowledge_vector_search
+            ON store_knowledge USING hnsw (embedding vector_cosine_ops);
+        """)
+        await conn.execute_query("""
+            CREATE INDEX IF NOT EXISTS idx_store_knowledge_keyword_search
+            ON store_knowledge USING GIN (content_tsv);
+        """)
+        print("✅ store_knowledge upgraded with vector + full-text search.")
+    except Exception as e:
+        # Table might not exist yet or extension missing; non-fatal in dev
+        print(f"⚠️ store_knowledge vector upgrade skipped or failed: {e}")
 
 
 async def close_db():

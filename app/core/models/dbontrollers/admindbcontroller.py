@@ -118,12 +118,12 @@ class AdminDbContoller:
             print(f"Error adding assest: {e}")
             raise ApplicationError.InternalServerError("Cannot add assest")
 
-    async def create_background_task(self, chatbot_id: int, user_id: int, task_data: Dict):
+    async def create_background_task(self, chatbot_id: int, user_id: int, task_data: Dict, task_type: str = "create_vectors"):
         try:
             return await self.models.background_tasks.create(
                 chatbot_id=chatbot_id,
                 user_id=user_id,
-                task_type="create_vectors",
+                task_type=task_type,
                 task_data=task_data,
                 status=self.models.background_task_status.pending
             )
@@ -236,7 +236,7 @@ class AdminDbContoller:
 
     async def find_one_ecom_store(self, store_id: str):
         try:
-            return await self.models.ecom_store.filter(store_id=store_id).first()
+            return await self.models.ecom_store.filter(user_id=store_id).first()
         except Exception as e:
             print(f"Error finding ecom store: {e}")
             raise ApplicationError.InternalServerError("Cannot find ecom store")

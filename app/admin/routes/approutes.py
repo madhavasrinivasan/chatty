@@ -48,6 +48,8 @@ async def get_response(request:llmrequest, user: dict = Depends(AppController.va
 async def shopify_callback(request:Request):
     return await AppController.shopify_callback(request) 
 
+# @adminapprouter.post("/getproducts",response_model=APIResponse)
+# async def get_products(request:Request,user:dict)
 
 
 

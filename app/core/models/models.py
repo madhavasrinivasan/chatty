@@ -32,7 +32,23 @@ class background_task_status(str, Enum):
     pending = "pending"
     running = "running"
     completed = "completed"
-    failed = "failed"
+    failed = "failed" 
+
+class background_task_type(str, Enum):
+    create_vectors = "create_vectors"
+    get_products = "get_products"
+    get_orders = "get_orders"
+
+
+class store_knowledge_data_type(str, Enum):
+    product = "product"
+    faq = "faq"
+    manual = "manual"
+
+
+class product_type(str, Enum):
+    shopify = "shopify"
+    custom = "custom"
 
 
 class users(models.Model):
@@ -101,27 +117,52 @@ class user_assets(models.Model):
 # vector_store
 # ============================
 
-class vector_store(models.Model):
-    id = fields.BigIntField(pk=True)
+# class vector_store(models.Model):
+#     id = fields.BigIntField(pk=True)
 
-    user_id = fields.IntField()
-    chatbot_id = fields.IntField()
+#     user_id = fields.IntField()
+#     chatbot_id = fields.IntField()
 
-    metadata = fields.JSONField(null=True)
+#     metadata = fields.JSONField(null=True)
+#     content = fields.TextField()
+
+#     # NOTE:
+#     # This will be created as JSON initially.
+#     # Convert to VECTOR(768) using raw SQL after schema creation.
+#     vector = fields.JSONField()
+
+#     created_at = fields.DatetimeField(auto_now_add=True)
+
+#     class Meta:
+#         table = "vector_store"
+#         indexes = [
+#             ("user_id",),
+#             ("chatbot_id",),
+#         ]
+
+
+
+class store_knowledge(models.Model):
+    id = fields.IntField(pk=True)
+    data_type = fields.CharEnumField(store_knowledge_data_type)  
+    shopify_product_id = fields.CharField(max_length=50, null=True, unique=True)  
+    handle = fields.CharField(max_length=255)
+    title = fields.TextField()
     content = fields.TextField()
-
-    # NOTE:
-    # This will be created as JSON initially.
-    # Convert to VECTOR(768) using raw SQL after schema creation.
-    vector = fields.JSONField()
-
+    price = fields.DecimalField(max_digits=10, decimal_places=2, null=True)  
+    stock = fields.IntField(default=0)
+    image_url = fields.TextField(null=True)
+    variant_data = fields.JSONField(null=True)
+    content_hash = fields.CharField(max_length=32, null=True)
+    product_type = fields.CharEnumField(product_type ,null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
 
     class Meta:
-        table = "vector_store"
+        table = "store_knowledge"
         indexes = [
-            ("user_id",),
-            ("chatbot_id",),
+            ("data_type",),
+            ("shopify_product_id",),
+            ("handle",),
         ]
 
 
@@ -195,7 +236,7 @@ class background_tasks(models.Model):
     id = fields.IntField(pk=True)
     chatbot_id = fields.IntField()
     user_id = fields.IntField()
-    task_type = fields.CharField(max_length=50, default="create_vectors")
+    task_type = fields.CharEnumField(background_task_type)
     task_data = fields.JSONField(null=True)  # Store urls, files, etc.
     status = fields.CharEnumField(background_task_status, default=background_task_status.pending)
     error_message = fields.TextField(null=True)
@@ -207,6 +248,7 @@ class background_tasks(models.Model):
         indexes = [
             ("chatbot_id",),
             ("user_id",),
+            ("task_type",),
             ("status",),
         ] 
 
