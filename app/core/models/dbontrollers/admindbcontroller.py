@@ -118,7 +118,7 @@ class AdminDbContoller:
             print(f"Error adding assest: {e}")
             raise ApplicationError.InternalServerError("Cannot add assest")
 
-    async def create_background_task(self, chatbot_id: int, user_id: int, task_data: Dict, task_type: str = "create_vectors"):
+    async def create_background_task(self, user_id: int, chatbot_id: int,task_data: Dict, task_type: str = "create_vectors"):
         try:
             return await self.models.background_tasks.create(
                 chatbot_id=chatbot_id,
@@ -234,9 +234,9 @@ class AdminDbContoller:
             raise ApplicationError.InternalServerError("Cannot get response")
 
 
-    async def find_one_ecom_store(self, store_id: str):
+    async def find_one_ecom_store(self, store_id: int):
         try:
-            return await self.models.ecom_store.filter(user_id=store_id).first()
+            return await self.models.ecom_store.filter(store_id=store_id).first()
         except Exception as e:
             print(f"Error finding ecom store: {e}")
             raise ApplicationError.InternalServerError("Cannot find ecom store")
@@ -248,3 +248,58 @@ class AdminDbContoller:
         except Exception as e:
             print(f"Error creating ecom store: {e}")
             raise ApplicationError.InternalServerError("Cannot create ecom store")
+
+    async def insert_products_to_database(self, products_list: list, store_id: int):
+        """
+        Insert a batch of products into store_knowledge.
+        Uses one parameterized INSERT per row (asyncpg-style $1 placeholders),
+        which avoids SQL injection and type issues while still batching at the
+        application level.
+        """
+        print(f"Products list: {products_list}")
+        try:
+            if not products_list:
+                return
+
+            sql = """
+            INSERT INTO store_knowledge (
+                shopify_product_id,
+                store_id,
+                handle,
+                title,
+                content,
+                price,
+                stock,
+                image_url,
+                variant_data,
+                embedding,
+                content_hash,
+                product_type,
+                data_type
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9, $10, $11, $12, $13
+            )
+            """
+
+            for product in products_list:
+                params = [
+                    product.get("shopify_product_id", ""),
+                    int(store_id),
+                    product.get("handle", ""),
+                    product.get("title", ""),
+                    product.get("content", ""),
+                    product.get("price", 0),
+                    product.get("stock", 0),
+                    product.get("image_url", ""),
+                    json.dumps(product.get("variant_data", {})),
+                    json.dumps(product.get("embedding", [])),
+                    product.get("content_hash", ""),
+                    product.get("product_type", "shopify"),
+                    product.get("data_type", "product"),
+                ]
+                await self.connection.execute_query(sql, params)
+        except Exception as e:
+            print(f"Error inserting products to database: {e}")
+            raise ApplicationError.InternalServerError("Cannot insert products to database")

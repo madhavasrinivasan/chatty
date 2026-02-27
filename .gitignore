@@ -6,6 +6,9 @@ dist/
 wheels/
 *.egg-info 
 .env
+shopifyscript.json
+convertion.py
+shopifyscript.py
 
 # Virtual environments
 .venv

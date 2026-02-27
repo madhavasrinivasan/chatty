@@ -144,7 +144,8 @@ class user_assets(models.Model):
 
 class store_knowledge(models.Model):
     id = fields.IntField(pk=True)
-    data_type = fields.CharEnumField(store_knowledge_data_type)  
+    data_type = fields.CharEnumField(store_knowledge_data_type) 
+    store_id = fields.BigIntField()
     shopify_product_id = fields.CharField(max_length=50, null=True, unique=True)  
     handle = fields.CharField(max_length=255)
     title = fields.TextField()
@@ -163,6 +164,7 @@ class store_knowledge(models.Model):
             ("data_type",),
             ("shopify_product_id",),
             ("handle",),
+            ("store_id",),
         ]
 
 
@@ -234,7 +236,7 @@ class user_sessions(models.Model):
 
 class background_tasks(models.Model):
     id = fields.IntField(pk=True)
-    chatbot_id = fields.IntField()
+    chatbot_id = fields.BigIntField()
     user_id = fields.IntField()
     task_type = fields.CharEnumField(background_task_type)
     task_data = fields.JSONField(null=True)  # Store urls, files, etc.

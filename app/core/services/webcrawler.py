@@ -15,6 +15,7 @@ from typing import List
 import json
 from app.core.config.config import settings
 from app.core.schema.applicationerror import ApplicationError
+from app.core.models.dbontrollers.admindbcontroller import AdminDbContoller
 client = genai.Client()
 
 
@@ -202,8 +203,36 @@ class Services():
             contents=[text],
             config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY", output_dimensionality=768)
         )
-        return response.embeddings[0].values 
+        return response.embeddings.values
 
+    
+    @staticmethod
+    async def generate_batch_embeddings(texts: list[str]):
+        # 1. Handle empty lists to avoid API errors
+        if not texts:
+            return []
+
+        # 2. Send the LIST directly to 'contents'
+        response = client.models.embed_content(
+            model="gemini-embedding-001", # Recommendation: Use 004 (Newer/Better)
+            contents=texts,
+            config=types.EmbedContentConfig(
+                task_type="RETRIEVAL_DOCUMENT", # <--- CORRECT TYPE FOR DB STORAGE
+                output_dimensionality=768
+            )
+        )
+        
+        
+        return [e.values for e in response.embeddings] 
+    
+    @staticmethod
+    async def vectiriseproductblob(content_blob_array: list):
+        try:
+           embeddings =  await Services.generate_batch_embeddings(content_blob_array); 
+           return embeddings
+        except Exception as e:
+            print(f"Error vectorizing product blob: {e}")
+            raise ApplicationError.InternalServerError("Cannot vectorize product blob")
 
 
     @staticmethod
@@ -283,4 +312,21 @@ You are a helpful AI assistant answering questions using ONLY the provided conte
 
         rag = await initialize_light_rag(store_id=store_id)  # adjust signature to accept store_id
         rags[store_id] = rag
-        return rag
+        return rag 
+    
+    @staticmethod
+    async def insert_products_to_database(products_list: list, store_id: int):
+        try:
+            # print(f"Products list: {products_list}")
+            content_blob_array = []
+            for product in products_list:
+                content_blob_array.append(product.get("content", ""))
+            embeddings = await Services.vectiriseproductblob(content_blob_array)
+            for product, embedding in zip(products_list, embeddings):
+                product["embedding"] = embedding
+            await AdminDbContoller().insert_products_to_database(products_list, store_id)
+               
+
+        except Exception as e:
+            print(f"Error inserting products to database: {e}")
+            raise ApplicationError.InternalServerError("Cannot insert products to database")

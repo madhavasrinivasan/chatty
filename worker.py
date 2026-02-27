@@ -62,9 +62,14 @@ async def process_background_tasks():
                         print(f"Processing get_products task {task.id}")
                         # Add actual task processing logic here if required
                         try:
+                            await controller.update_background_task_status(
+                                task.id, 
+                                Models.background_task_status.running
+                            )
                             await AppController.get_products_background_task(
                                 task.chatbot_id,
-                                task.user_id
+                                task.user_id,
+                                task.id
                             )
                         except Exception as e:
                             print(f"Error processing get_products task {task.id}: {e}")

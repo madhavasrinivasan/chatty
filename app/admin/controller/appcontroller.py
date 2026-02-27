@@ -22,12 +22,144 @@ import time
 import os
 from datetime import datetime, timedelta, timezone
 import shopify
+from shopify.collection import PaginatedIterator
 import jwt
 import httpx
 import json
+from bs4 import BeautifulSoup
+import hashlib
 
 
 directory = settings.file_upload_directory_pdf
+
+
+def get_product_collections(product_id) -> list[str]:
+    """
+    Fetches the names of all collections (Manual & Automated)
+    that a specific product belongs to. Critical for AI: e.g. user asks
+    "Show me your Liquid collection" — "Liquid" is in the collection name,
+    not necessarily in the product description.
+    """
+    collection_names: list[str] = []
+
+    # 1. Get "Custom" Collections (manual ones)
+    try:
+        custom_colls = shopify.CustomCollection.find(product_id=product_id)
+        if custom_colls:
+            items = custom_colls if isinstance(custom_colls, list) else [custom_colls]
+            collection_names.extend([str(c.title) for c in items if getattr(c, "title", None)])
+    except Exception:
+        pass
+
+    # 2. Get "Smart" Collections (automated ones based on tags/rules)
+    try:
+        smart_colls = shopify.SmartCollection.find(product_id=product_id)
+        if smart_colls:
+            items = smart_colls if isinstance(smart_colls, list) else [smart_colls]
+            collection_names.extend([str(c.title) for c in items if getattr(c, "title", None)])
+    except Exception:
+        pass
+
+    return list(set(collection_names))  # Remove duplicates
+
+
+def transform_shopify_product(raw_json: dict, collection_text: str = "") -> dict:
+    """
+    Flatten raw Shopify product JSON into a StoreKnowledge-friendly shape.
+    """
+    # 1. Clean the HTML description
+    soup = BeautifulSoup((raw_json.get("body_html") or ""), "html.parser")
+    clean_description = soup.get_text(separator=" ").strip()
+
+    # 2. Aggregate variants (price, stock, options)
+    variants = raw_json.get("variants") or []
+
+    prices: list[float] = []
+    total_stock = 0
+    for v in variants:
+        if not isinstance(v, dict):
+            continue
+        price_val = v.get("price")
+        if price_val is not None:
+            try:
+                prices.append(float(price_val))
+            except (TypeError, ValueError):
+                pass
+        qty = v.get("inventory_quantity")
+        if isinstance(qty, (int, float)):
+            total_stock += int(qty)
+
+    min_price = min(prices) if prices else 0.0
+
+    # Options text (e.g. colors/sizes)
+    option_values: list[str] = []
+    for option in raw_json.get("options") or []:
+        if not isinstance(option, dict):
+            continue
+        vals = option.get("values") or []
+        option_values.extend([str(v) for v in vals])
+    options_text = ", ".join(option_values)
+
+    # Collect SKUs from variants (for "model number" / SKU search)
+    skus: list[str] = []
+    for v in variants:
+        if not isinstance(v, dict):
+            continue
+        sku = v.get("sku")
+        if sku and str(sku).strip():
+            sku_str = str(sku).strip()
+            if sku_str not in skus:
+                skus.append(sku_str)
+    skus_text = ", ".join(skus) if skus else ""
+
+    # 3. Build the content blob the embedding model will see (includes collections for AI search)
+    title = raw_json.get("title") or ""
+    handle = raw_json.get("handle") or ""
+    tags = raw_json.get("tags") or ""
+    vendor = (raw_json.get("vendor") or "").strip()
+
+    parts = [title]
+    if clean_description:
+        parts.append(clean_description)
+    if vendor:
+        parts.append(f"Vendor: {vendor}.")
+    if options_text:
+        parts.append(f"Available Options: {options_text}.")
+    if skus_text:
+        parts.append(f"SKUs: {skus_text}.")
+    # Always add collections to content blob so AI can answer "show me your X collection"
+    parts.append(f"Collections: {collection_text if collection_text else 'None'}.")
+    if tags:
+        parts.append(f"Tags: {tags}")
+    content_blob = " ".join(parts).strip()
+
+    # 4. Content hash for change detection
+    content_hash = hashlib.md5(content_blob.encode("utf-8")).hexdigest()
+
+    # 5. First image URL (if any)
+    image_url = None
+    images = raw_json.get("images") or []
+    if images:
+        first = images[0] or {}
+        if isinstance(first, dict):
+            image_url = first.get("src")
+
+    # 6. Return flattened row
+    row = {
+        "shopify_product_id": str(raw_json.get("id") or ""),
+        "handle": handle,
+        "title": title,
+        "content": content_blob,
+        "price": min_price,
+        "stock": total_stock,
+        "image_url": image_url,
+        "variant_data": variants,
+        "content_hash": content_hash,
+    }
+    if collection_text:
+        row["collections"] = collection_text
+    return row
+
 
 class  AppController:
     @staticmethod
@@ -208,14 +340,14 @@ class  AppController:
    
 
 
+   
     @staticmethod
-    @staticmethod
-    async def get_products_background_task(chatbot_id: int, store_id: int):
+    async def get_products_background_task(chatbot_id: int, store_id: int , task_id: int):
         try:
             print(f"Getting products background task for chatbot: {chatbot_id}")
 
-            # find_one_ecom_store looks up by user_id (param name is store_id for legacy reasons)
-            shop_details = await AdminDbContoller().find_one_ecom_store(store_id=store_id)
+            
+            shop_details = await AdminDbContoller().find_one_ecom_store(store_id=chatbot_id)
             if not shop_details or shop_details is None:
                 raise ApplicationError.SomethingWentWrong("Cannot find shopify store")
 
@@ -228,55 +360,43 @@ class  AppController:
 
             session = shopify.Session(store_name.strip(), "2024-04", access_token)
             shopify.ShopifyResource.activate_session(session)
-
+            products_list = []
             try:
                 shop = shopify.Shop.current()
                 print(f"✅ Success! Connected to shop: {shop.name}")
                 print(f"Currency: {shop.currency}")
 
-                products = shopify.Product.find()
-                for product in products:
-                    print("------------------------------------------------")
-                    print(f"📦 Product: {product.title}")
-                    print(f"🆔 ID: {product.id}")
-                    product_data = product.to_dict()
-                    print(json.dumps(product_data, indent=4, default=str))
+                # Paginate through ALL products (Shopify returns 50 per page by default)
+                for page in PaginatedIterator(shopify.Product.find(limit=250)):
+                    for product in page:
+                        print(f"Product: {product.title} (id={product.id})")
+                        collections = get_product_collections(product.id)
+                        collection_text = ", ".join(collections) if collections else ""
 
-                    # --- GET DESCRIPTION ---
-                    description = getattr(product, 'body_html', None) or ""
-                    desc_preview = (description[:50] + "...") if len(description) > 50 else description or "No description"
-                    print(f"📝 Description: {desc_preview}")
+                        raw = product.to_dict()
+                        clean_product = transform_shopify_product(raw, collection_text=collection_text)
+                        products_list.append(clean_product)
 
-                    # --- GET VARIANTS (Price, Stock, Options) ---
-                    if product.variants:
-                        print(f"🗂️ Variants ({len(product.variants)}):")
-                        for variant in product.variants:
-                            print(f"   - {getattr(variant, 'title', None) or 'N/A'}")
-                            print(f"     💰 Price: {getattr(variant, 'price', None) or 'N/A'}")
-                            print(f"     📦 Stock: {getattr(variant, 'inventory_quantity', None) or 0}")
-                            print(f"     🏷️ SKU: {getattr(variant, 'sku', None) or 'N/A'}")
+        
+                        if len(products_list) >= 50:
+                            await Services.insert_products_to_database(products_list, store_id=store_id)
+                            products_list = []
 
-                    # --- GET METAFIELDS ---
-                    try:
-                        metafields = product.metafields()
-                        if metafields:
-                            print(f"🔑 Metafields ({len(metafields)}):")
-                            for meta in metafields:
-                                print(f"   - {meta.namespace}.{meta.key}: {meta.value}")
-                    except Exception as e:
-                        print(f"   ⚠️ Could not fetch metafields: {e}")
+                if products_list:
+                    await Services.insert_products_to_database(products_list, store_id=store_id)
 
+                await AdminDbContoller().update_background_task_status(task_id, "completed", None)
             except Exception as e:
                 print(f"error getting products background task: {e}")
-                error_message = getattr(e, "message", str(e))
-                raise ApplicationError.SomethingWentWrong(error_message)
+                await AdminDbContoller().update_background_task_status(task_id, "failed" ,str(e))
+                raise ApplicationError.SomethingWentWrong(str(e) or "Something went wrong")
             finally:
                 shopify.ShopifyResource.clear_session()
 
         except Exception as e:
             print(f"error in get_products_background_task: {e}")
-            error_message = getattr(e, "message", str(e))
-            raise ApplicationError.SomethingWentWrong(error_message)
+            await AdminDbContoller().update_background_task_status(task_id, "failed" ,str(e))
+            raise ApplicationError.SomethingWentWrong(str(e) or "Something went wrong")
 
 
     @staticmethod
@@ -328,8 +448,6 @@ class  AppController:
                     message="Missing shop or id_token parameters.",
                     data=None,
                 )
-
-            # Decode id_token (signature not verified here; Shopify validates during token exchange)
             try:
                 decoded_token = jwt.decode(
                     id_token,
@@ -401,7 +519,7 @@ class  AppController:
 
                 await AdminDbContoller().create_background_task(
                     user_id=1,
-                    chatbot_id=1,
+                    chatbot_id=int(store_id),
                     task_type="get_products",
                     task_data=None,
                     # status="pending"
