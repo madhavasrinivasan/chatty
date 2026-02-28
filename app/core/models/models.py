@@ -82,7 +82,7 @@ class chatbot_settings(models.Model):
     allowed_url = fields.JSONField(null=True)
 
     is_test = fields.BooleanField(default=False)
-    api_key = fields.CharField(max_length=128, unique=True)
+    api_key = fields.CharField(max_length=512, unique=True)
 
     created_at = fields.DatetimeField(auto_now_add=True)
 
@@ -258,19 +258,19 @@ class background_tasks(models.Model):
 class ecom_store(models.Model):
     id = fields.IntField(pk=True)
     user_id = fields.IntField()
-    store_id = fields.CharField(max_length=255)
+    chatbot_id = fields.IntField(null=True)
+    store_id = fields.CharField(max_length=255, null=True)
     store_name = fields.CharField(max_length=255)
-    access_token = fields.CharField(max_length=255)
-    refresh_token = fields.CharField(max_length=255)
-    expires_at = fields.DatetimeField()
-    created_at = fields.DatetimeField(auto_now_add=True)
-    updated_at = fields.DatetimeField(auto_now=True)
-    store_type = fields.CharEnumField(ecom_store_type)
+    access_token = fields.CharField(max_length=255 , null=True)
+    refresh_token = fields.CharField(max_length=255 , null=True)
+    expires_at = fields.DatetimeField(null=True)
+    created_at = fields.DatetimeField(auto_now_add=True, null=True)
+    updated_at = fields.DatetimeField(auto_now=True, null=True)
+    store_type = fields.CharEnumField(ecom_store_type, null=True)
     class Meta:
         table = "ecom_store"
         indexes = [
             ("store_id",),
             ("user_id",),
-            ("store_name",),
-            ("store_type",),
+            ("chatbot_id",),
         ]

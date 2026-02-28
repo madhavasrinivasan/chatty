@@ -1,12 +1,13 @@
 from pickle import ADDITEMS
 from llama_index_instrumentation.span_handlers import null
 from app.core.models.dbontrollers.admindbcontroller import AdminDbContoller
-from app.core.schema.schema import RegisterRequest, LoginRequest,llmrequest
+from app.core.schema.schema import RegisterRequest, LoginRequest,llmrequest, AddshopifyRequest
 from app.core.schema.schemarespone import APIResponse
 from app.core.schema.applicationerror import ApplicationError
 from fastapi import Request, BackgroundTasks
 from app.core.services.jwt import JWTService
 from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
 from fastapi import Request
 from Crypto.Random import get_random_bytes
 from typing import List, Optional
@@ -28,9 +29,49 @@ import httpx
 import json
 from bs4 import BeautifulSoup
 import hashlib
+import binascii
 
 
 directory = settings.file_upload_directory_pdf
+
+
+def _generate_shopify_install_url(store_name: str) -> tuple[str, str]:
+    """
+    Generates the URL that sends the user to Shopify to approve your app.
+    Returns (install_url, state). Save state in DB/session to verify on callback.
+    """
+    clean_store = store_name.replace("https://", "").replace(".myshopify.com", "").strip()
+    scopes = [
+        "read_products",
+        "read_content",
+        "read_orders",
+        "read_inventory",
+    ]
+    callback_domain = (settings.shopify_callback_domain or "").rstrip("/")
+    redirect_uri = f"{callback_domain}" if callback_domain else ""
+    state = binascii.b2a_hex(os.urandom(15)).decode("utf-8")
+    session = shopify.Session(f"{clean_store}.myshopify.com", settings.shopify_api_version or "2024-04")
+    permission_url = session.create_permission_url(scopes, redirect_uri, state)
+    return permission_url, state
+
+
+def _encrypt_token(token: str) -> str:
+    """Encrypt a string (e.g. JWT) with AES-256-CBC; returns base64-encoded iv+ciphertext."""
+    key = hashlib.sha256((settings.secret_key or "default-secret").encode()).digest()
+    iv = get_random_bytes(16)
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    data = token.encode("utf-8")
+    ct = cipher.encrypt(pad(data, AES.block_size))
+    return base64.b64encode(iv + ct).decode("ascii")
+
+
+def _decrypt_token(encrypted: str) -> str:
+    """Decrypt a string produced by _encrypt_token; returns the original JWT/token string."""
+    key = hashlib.sha256((settings.secret_key or "default-secret").encode()).digest()
+    raw = base64.b64decode(encrypted)
+    iv, ct = raw[:16], raw[16:]
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    return unpad(cipher.decrypt(ct), AES.block_size).decode("utf-8")
 
 
 def get_product_collections(product_id) -> list[str]:
@@ -347,7 +388,7 @@ class  AppController:
             print(f"Getting products background task for chatbot: {chatbot_id}")
 
             
-            shop_details = await AdminDbContoller().find_one_ecom_store(store_id=chatbot_id)
+            shop_details = await AdminDbContoller().find_one_ecom_store(chatbot_id=chatbot_id)
             if not shop_details or shop_details is None:
                 raise ApplicationError.SomethingWentWrong("Cannot find shopify store")
 
@@ -379,11 +420,11 @@ class  AppController:
 
         
                         if len(products_list) >= 50:
-                            await Services.insert_products_to_database(products_list, store_id=store_id)
+                            await Services.insert_products_to_database(products_list, chatbot_id=chatbot_id)
                             products_list = []
 
                 if products_list:
-                    await Services.insert_products_to_database(products_list, store_id=store_id)
+                    await Services.insert_products_to_database(products_list, chatbot_id=chatbot_id)
 
                 await AdminDbContoller().update_background_task_status(task_id, "completed", None)
             except Exception as e:
@@ -438,45 +479,51 @@ class  AppController:
     
     @staticmethod
     async def shopify_callback(request: Request):
+        """
+        OAuth callback: ?code=...&hmac=...&shop=...&state=...&timestamp=...
+        Exchange code for access_token, then update existing ecom_store (no create).
+        """
         try:
+            # 1. Parse query params (OAuth redirect from Shopify)
+            code = request.query_params.get("code")
             shop = request.query_params.get("shop")
-            id_token = request.query_params.get("id_token")
+            hmac_param = request.query_params.get("hmac")
+            state = request.query_params.get("state")
+            timestamp = request.query_params.get("timestamp")
 
-            if not id_token or not shop:
+            if not code or not shop:
                 return APIResponse(
-                    success=False,
-                    message="Missing shop or id_token parameters.",
+                    status=400,
+                    message="Missing code or shop parameters.",
                     data=None,
                 )
-            try:
-                decoded_token = jwt.decode(
-                    id_token,
-                    options={"verify_signature": False},
-                )
-            except Exception as e:
-                print(f"shopify_callback jwt error: {e}")
-                raise ApplicationError.SomethingWentWrong("Invalid id_token.")
-            store_id = decoded_token.get("sub")  # permanent store ID
 
             api_key = settings.shopify_api_key
             api_secret = settings.shopify_api_secret
             if not api_key or not api_secret:
                 return APIResponse(
-                    success=False,
+                    status=500,
                     message="Shopify API key or secret not configured.",
                     data=None,
                 )
 
-            # Token exchange: get permanent access token
+            # 2. Validate HMAC (Shopify OAuth verification)
+            shopify.Session.setup(api_key=api_key, secret=api_secret)
+            params = dict(request.query_params)
+            if not shopify.Session.validate_params(params):
+                return APIResponse(
+                    status=400,
+                    message="Invalid HMAC or expired request.",
+                    data=None,
+                )
+
+            # 3. Exchange code for access_token
             token_url = f"https://{shop}/admin/oauth/access_token"
             payload = {
                 "client_id": api_key,
                 "client_secret": api_secret,
-                "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-                "subject_token": id_token,
-                "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
+                "code": code,
             }
-
             async with httpx.AsyncClient() as client:
                 response = await client.post(token_url, data=payload)
                 response.raise_for_status()
@@ -485,7 +532,7 @@ class  AppController:
             access_token = token_data.get("access_token")
             if not access_token:
                 return APIResponse(
-                    success=False,
+                    status=400,
                     message="Token exchange did not return access_token.",
                     data=None,
                 )
@@ -497,38 +544,37 @@ class  AppController:
                 expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
             refresh_token = token_data.get("refresh_token") or ""
 
-          
-            existing = await AdminDbContoller().find_one_ecom_store(store_id=store_id)
-            store_name = shop  
-            if existing:
-                existing.access_token = access_token
-                existing.refresh_token = refresh_token
-                existing.expires_at = expires_at
-                existing.store_name = store_name
-                await existing.save()
-            else:
-                await AdminDbContoller().create_ecom_store(
-                    user_id=1,
-                    store_id=store_id,
-                    store_name=store_name,
-                    access_token=access_token,
-                    refresh_token=refresh_token,
-                    expires_at=expires_at,
-                    store_type="shopify"
-                ) 
+            # 4. Find existing ecom_store (created in addshopify); do NOT create here
+            existing = await AdminDbContoller().find_one_ecom_store_by_shop(shop)
+            if not existing:
+                return APIResponse(
+                    status=404,
+                    message="Store not found. Complete Add Shopify flow first.",
+                    data=None,
+                )
 
+            # 5. Update existing store tokens in DB (explicit UPDATE so access_token is persisted)
+            await AdminDbContoller().update_ecom_store_tokens(
+                ecom_store_id=existing.id,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                expires_at=expires_at,
+                store_name=shop,
+            )
+
+            # 6. Trigger get_products background task for this store
+            if existing.chatbot_id and existing.user_id:
                 await AdminDbContoller().create_background_task(
-                    user_id=1,
-                    chatbot_id=int(store_id),
+                    user_id=existing.user_id,
+                    chatbot_id=existing.chatbot_id,
                     task_type="get_products",
                     task_data=None,
-                    # status="pending"
                 )
 
             return APIResponse(
                 status=200,
                 message="Shopify callback successful; access token saved.",
-                data=json.dumps({"store_id": store_id, "shop": shop}),
+                data=json.dumps({"store_id": existing.id, "shop": shop}),
             )
         except httpx.HTTPStatusError as e:
             print(f"shopify_callback token exchange error: {e}")
@@ -539,6 +585,63 @@ class  AppController:
             print(f"error shopify callback: {e}")
             error_message = getattr(e, "message", str(e))
             raise ApplicationError.SomethingWentWrong(error_message)
+
+
+       
+
             
-            
+    @staticmethod
+    async def addshopify(request: AddshopifyRequest, user: dict):
+        try:
+            store_name = request.store_name
+            print(f"[addshopify] Received store_name: {store_name}")
+
+            shopify.Session.setup(
+                api_key=settings.shopify_api_key,
+                secret=settings.shopify_api_secret,
+            )
+
+            chatbot_id = await AdminDbContoller().create_chatbot({"id": user["id"]})
+            print(f"[addshopify] Created chatbot with id: {getattr(chatbot_id, 'id', None)}")
+
+            token = JWTService().generate_token({
+                "user_id": user["id"],
+                "username": user["username"],
+                "chatbot_id": chatbot_id.id,
+            })
+            print(f"[addshopify] Generated JWT token: {token}")
+
+            encrypted_api_key = _encrypt_token(token)
+            print(f"[addshopify] Encrypted API key: {encrypted_api_key}")
+
+            await AdminDbContoller().update_chatbot(chatbot_id.id, {"api_key": encrypted_api_key})
+            print(f"[addshopify] Updated chatbot {chatbot_id.id} with new api_key.")
+
+            await AdminDbContoller().create_ecom_store(
+                user_id=user["id"],
+                chatbot_id=chatbot_id.id,
+                store_name=store_name,
+                store_type="shopify",
+                access_token=None,
+                refresh_token=None,
+                expires_at=None,
+                store_id=None
+            )
+
+            install_url, state = _generate_shopify_install_url(store_name)
+            print(f"[addshopify] Generated install URL for {store_name}; state={state}")
+
+            return APIResponse(
+                status=200,
+                message="Ecom store created; redirect user to install URL.",
+                data={
+                    "install_url": install_url,
+                    "state": state,
+                    "store_name": store_name,
+                },
+            )
+        except Exception as e:
+            print(f"error adding shopify: {e}")
+            error_message = getattr(e, "message", str(e))
+            raise ApplicationError.SomethingWentWrong(error_message)
         

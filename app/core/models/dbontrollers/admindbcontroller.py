@@ -32,6 +32,14 @@ class AdminDbContoller:
             print(f"Error finding user: {e}")
             raise ApplicationError.InternalServerError("Cannot find user") 
 
+
+    async def find_one_chatbot(self, store_id: int):
+        try:
+            return await self.models.chatbot_settings.filter(store_id=store_id).first()
+        except Exception as e:
+            print(f"Error finding chatbot: {e}")
+            raise ApplicationError.InternalServerError("Cannot find chatbot") 
+
     async def create_user_session(self, user_id: int, token: str, ip: str):
         try:
             return await self.models.user_sessions.create(user_id=user_id, token=token, ip_address=ip, status="active")
@@ -93,6 +101,12 @@ class AdminDbContoller:
             print(f"Error creating chatbot: {e}")
             raise ApplicationError.InternalServerError("Cannot create chatbot")
 
+    async def update_chatbot(self, chatbot_id: int, body: dict):
+        try:
+            return await self.models.chatbot_settings.filter(id=chatbot_id).update(**body)
+        except Exception as e:
+            print(f"Error updating chatbot: {e}")
+            raise ApplicationError.InternalServerError("Cannot update chatbot")
 
 
     async def add_assest(self, chatbot_id: int, files: List[dict]):
@@ -234,22 +248,49 @@ class AdminDbContoller:
             raise ApplicationError.InternalServerError("Cannot get response")
 
 
-    async def find_one_ecom_store(self, store_id: int):
+    async def find_one_ecom_store(self, chatbot_id: int):
         try:
-            return await self.models.ecom_store.filter(store_id=store_id).first()
+            return await self.models.ecom_store.filter(chatbot_id=chatbot_id).first()
         except Exception as e:
             print(f"Error finding ecom store: {e}")
             raise ApplicationError.InternalServerError("Cannot find ecom store")
 
-
-    async def create_ecom_store(self, user_id: int, store_id: str, store_name: str, access_token: str, refresh_token: str, expires_at: datetime, store_type: str):
+    async def find_one_ecom_store_by_shop(self, shop: str):
+        """Find ecom_store by store domain (e.g. chatty-store-3.myshopify.com or chatty-store-3)."""
         try:
-            return await self.models.ecom_store.create(user_id=user_id, store_id=store_id, store_name=store_name, access_token=access_token, refresh_token=refresh_token, expires_at=expires_at, store_type=store_type)
+            clean = (shop or "").replace("https://", "").replace(".myshopify.com", "").strip()
+            # Try exact shop first, then without .myshopify.com
+            row = await self.models.ecom_store.filter(store_name=shop).first()
+            if row:
+                return row
+            if clean and clean != shop:
+                return await self.models.ecom_store.filter(store_name=clean).first()
+            return None
+        except Exception as e:
+            print(f"Error finding ecom store by shop: {e}")
+            raise ApplicationError.InternalServerError("Cannot find ecom store")
+
+    async def update_ecom_store_tokens(self, ecom_store_id: int, access_token: str, refresh_token: str, expires_at, store_name: str = None):
+        """Update access_token, refresh_token, expires_at (and optionally store_name) for an ecom_store."""
+        try:
+            q = self.models.ecom_store.filter(id=ecom_store_id)
+            upd = {"access_token": access_token, "refresh_token": refresh_token, "expires_at": expires_at}
+            if store_name is not None:
+                upd["store_name"] = store_name
+            await q.update(**upd)
+        except Exception as e:
+            print(f"Error updating ecom store tokens: {e}")
+            raise ApplicationError.InternalServerError("Cannot update ecom store tokens")
+
+
+    async def create_ecom_store(self, user_id: int, chatbot_id: int, store_id: str, store_name: str, access_token: str, refresh_token: str, expires_at: datetime, store_type: str):
+        try:
+            return await self.models.ecom_store.create(user_id=user_id, chatbot_id=chatbot_id, store_id=store_id, store_name=store_name, access_token=access_token, refresh_token=refresh_token, expires_at=expires_at, store_type=store_type)
         except Exception as e:
             print(f"Error creating ecom store: {e}")
             raise ApplicationError.InternalServerError("Cannot create ecom store")
 
-    async def insert_products_to_database(self, products_list: list, store_id: int):
+    async def insert_products_to_database(self, products_list: list, chatbot_id: int):
         """
         Insert a batch of products into store_knowledge.
         Uses one parameterized INSERT per row (asyncpg-style $1 placeholders),
@@ -286,7 +327,7 @@ class AdminDbContoller:
             for product in products_list:
                 params = [
                     product.get("shopify_product_id", ""),
-                    int(store_id),
+                    int(chatbot_id),
                     product.get("handle", ""),
                     product.get("title", ""),
                     product.get("content", ""),

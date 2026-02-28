@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Request, BackgroundTasks, Form, File, Up
 from app.admin.controller.appcontroller import AppController
 from app.core.schema.schemarespone import APIResponse
 from app.core.services.filehandler import FileHandler
-from app.core.schema.schema import UploadKnowledgeBaseRequest
+from app.core.schema.schema import UploadKnowledgeBaseRequest, AddshopifyRequest
 from app.core.schema.schema import llmrequest , llmresponse
 from typing import List, Optional
 
@@ -47,6 +47,10 @@ async def get_response(request:llmrequest, user: dict = Depends(AppController.va
 @adminapprouter.get("/shopify-callback",response_model=APIResponse)
 async def shopify_callback(request:Request):
     return await AppController.shopify_callback(request) 
+
+@adminapprouter.post("/addshoppify",response_model=APIResponse)
+async def addshoppify(request:AddshopifyRequest,user:dict = Depends(AppController.validate_user)):
+    return await AppController.addshopify(request,user)
 
 # @adminapprouter.post("/getproducts",response_model=APIResponse)
 # async def get_products(request:Request,user:dict)

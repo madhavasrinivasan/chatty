@@ -42830,3 +42830,175 @@ HINT:  No function matches the given name and argument types. You might need to 
 2026-02-20 18:15:19,295 - lightrag - INFO - Final context: 40 entities, 160 relations, 20 chunks
 2026-02-20 18:15:19,295 - lightrag - INFO - Final chunks S+F/O: E1/1 E1/2 E3/3 E5/4 E1/5 E4/6 E1/7 E2/8 E2/9 E7/10 E2/11 E1/12 E2/13 E1/14 E1/15 E3/16 E1/17 E2/18 E3/19 E3/20
 2026-02-20 18:15:22,046 - lightrag - INFO -  == LLM cache == saving: hybrid:query:e15a92334bba6fd353d26c0e9577a0bf
+2026-02-28 22:58:17,895 - lightrag - INFO - [1] Created new empty graph file: /Users/madhava/Developmemt/chatty_backend/rag/1/1/graph_chunk_entity_relation.graphml
+2026-02-28 22:58:17,896 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-02-28 22:58:17,896 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-02-28 22:58:17,896 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-02-28 22:58:17,896 - lightrag - INFO - PostgreSQL, Retry config: attempts=10, backoff=3.0s, backoff_max=30.0s, pool_close_timeout=5.0s
+2026-02-28 22:58:17,912 - lightrag - INFO - PostgreSQL, VECTOR extension enabled
+2026-02-28 22:58:17,922 - lightrag - INFO - PostgreSQL, Connected to database at localhost:5432/chatty without SSL
+2026-02-28 22:58:17,923 - lightrag - ERROR - PostgreSQL database, error:relation "lightrag_doc_full" does not exist
+2026-02-28 22:58:17,924 - lightrag - INFO - PostgreSQL, Try Creating table LIGHTRAG_DOC_FULL in database
+2026-02-28 22:58:17,931 - lightrag - INFO - PostgreSQL, Creation success table LIGHTRAG_DOC_FULL in PostgreSQL database
+2026-02-28 22:58:17,932 - lightrag - ERROR - PostgreSQL database, error:relation "lightrag_doc_chunks" does not exist
+2026-02-28 22:58:17,932 - lightrag - INFO - PostgreSQL, Try Creating table LIGHTRAG_DOC_CHUNKS in database
+2026-02-28 22:58:17,935 - lightrag - INFO - PostgreSQL, Creation success table LIGHTRAG_DOC_CHUNKS in PostgreSQL database
+2026-02-28 22:58:17,936 - lightrag - ERROR - PostgreSQL database, error:relation "lightrag_llm_cache" does not exist
+2026-02-28 22:58:17,936 - lightrag - INFO - PostgreSQL, Try Creating table LIGHTRAG_LLM_CACHE in database
+2026-02-28 22:58:17,941 - lightrag - INFO - PostgreSQL, Creation success table LIGHTRAG_LLM_CACHE in PostgreSQL database
+2026-02-28 22:58:17,942 - lightrag - ERROR - PostgreSQL database, error:relation "lightrag_doc_status" does not exist
+2026-02-28 22:58:17,942 - lightrag - INFO - PostgreSQL, Try Creating table LIGHTRAG_DOC_STATUS in database
+2026-02-28 22:58:17,945 - lightrag - INFO - PostgreSQL, Creation success table LIGHTRAG_DOC_STATUS in PostgreSQL database
+2026-02-28 22:58:17,945 - lightrag - ERROR - PostgreSQL database, error:relation "lightrag_full_entities" does not exist
+2026-02-28 22:58:17,945 - lightrag - INFO - PostgreSQL, Try Creating table LIGHTRAG_FULL_ENTITIES in database
+2026-02-28 22:58:17,948 - lightrag - INFO - PostgreSQL, Creation success table LIGHTRAG_FULL_ENTITIES in PostgreSQL database
+2026-02-28 22:58:17,948 - lightrag - ERROR - PostgreSQL database, error:relation "lightrag_full_relations" does not exist
+2026-02-28 22:58:17,948 - lightrag - INFO - PostgreSQL, Try Creating table LIGHTRAG_FULL_RELATIONS in database
+2026-02-28 22:58:17,951 - lightrag - INFO - PostgreSQL, Creation success table LIGHTRAG_FULL_RELATIONS in PostgreSQL database
+2026-02-28 22:58:17,951 - lightrag - ERROR - PostgreSQL database, error:relation "lightrag_entity_chunks" does not exist
+2026-02-28 22:58:17,951 - lightrag - INFO - PostgreSQL, Try Creating table LIGHTRAG_ENTITY_CHUNKS in database
+2026-02-28 22:58:17,954 - lightrag - INFO - PostgreSQL, Creation success table LIGHTRAG_ENTITY_CHUNKS in PostgreSQL database
+2026-02-28 22:58:17,954 - lightrag - ERROR - PostgreSQL database, error:relation "lightrag_relation_chunks" does not exist
+2026-02-28 22:58:17,954 - lightrag - INFO - PostgreSQL, Try Creating table LIGHTRAG_RELATION_CHUNKS in database
+2026-02-28 22:58:17,956 - lightrag - INFO - PostgreSQL, Creation success table LIGHTRAG_RELATION_CHUNKS in PostgreSQL database
+2026-02-28 22:58:17,969 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_doc_full_id on table LIGHTRAG_DOC_FULL
+2026-02-28 22:58:17,970 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_doc_full_workspace_id on table LIGHTRAG_DOC_FULL
+2026-02-28 22:58:17,972 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_doc_chunks_id on table LIGHTRAG_DOC_CHUNKS
+2026-02-28 22:58:17,973 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_doc_chunks_workspace_id on table LIGHTRAG_DOC_CHUNKS
+2026-02-28 22:58:17,974 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_llm_cache_id on table LIGHTRAG_LLM_CACHE
+2026-02-28 22:58:17,975 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_llm_cache_workspace_id on table LIGHTRAG_LLM_CACHE
+2026-02-28 22:58:17,976 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_doc_status_id on table LIGHTRAG_DOC_STATUS
+2026-02-28 22:58:17,977 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_doc_status_workspace_id on table LIGHTRAG_DOC_STATUS
+2026-02-28 22:58:17,977 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_full_entities_id on table LIGHTRAG_FULL_ENTITIES
+2026-02-28 22:58:17,978 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_full_entities_workspace_id on table LIGHTRAG_FULL_ENTITIES
+2026-02-28 22:58:17,979 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_full_relations_id on table LIGHTRAG_FULL_RELATIONS
+2026-02-28 22:58:17,980 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_full_relations_workspace_id on table LIGHTRAG_FULL_RELATIONS
+2026-02-28 22:58:17,980 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_entity_chunks_id on table LIGHTRAG_ENTITY_CHUNKS
+2026-02-28 22:58:17,982 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_entity_chunks_workspace_id on table LIGHTRAG_ENTITY_CHUNKS
+2026-02-28 22:58:17,982 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_relation_chunks_id on table LIGHTRAG_RELATION_CHUNKS
+2026-02-28 22:58:17,983 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_relation_chunks_workspace_id on table LIGHTRAG_RELATION_CHUNKS
+2026-02-28 22:58:17,992 - lightrag - INFO - chunk_id column already exists in LIGHTRAG_LLM_CACHE table
+2026-02-28 22:58:17,992 - lightrag - INFO - cache_type column already exists in LIGHTRAG_LLM_CACHE table
+2026-02-28 22:58:17,992 - lightrag - INFO - queryparam column already exists in LIGHTRAG_LLM_CACHE table
+2026-02-28 22:58:17,992 - lightrag - INFO - mode column does not exist in LIGHTRAG_LLM_CACHE table
+2026-02-28 22:58:17,994 - lightrag - INFO - chunks_list column already exists in LIGHTRAG_DOC_STATUS table
+2026-02-28 22:58:17,996 - lightrag - INFO - llm_cache_list column already exists in LIGHTRAG_DOC_CHUNKS table
+2026-02-28 22:58:18,000 - lightrag - INFO - track_id column already exists in LIGHTRAG_DOC_STATUS table
+2026-02-28 22:58:18,000 - lightrag - INFO - Creating index on track_id column for LIGHTRAG_DOC_STATUS table
+2026-02-28 22:58:18,001 - lightrag - INFO - Successfully created index on track_id column for LIGHTRAG_DOC_STATUS table
+2026-02-28 22:58:18,002 - lightrag - INFO - metadata column already exists in LIGHTRAG_DOC_STATUS table
+2026-02-28 22:58:18,003 - lightrag - INFO - error_msg column already exists in LIGHTRAG_DOC_STATUS table
+2026-02-28 22:58:18,004 - lightrag - INFO - Creating pagination index: Composite index for workspace + status + updated_at pagination
+2026-02-28 22:58:18,005 - lightrag - INFO - Successfully created index: idx_lightrag_doc_status_workspace_status_updated_at
+2026-02-28 22:58:18,005 - lightrag - INFO - Creating pagination index: Composite index for workspace + status + created_at pagination
+2026-02-28 22:58:18,006 - lightrag - INFO - Successfully created index: idx_lightrag_doc_status_workspace_status_created_at
+2026-02-28 22:58:18,007 - lightrag - INFO - Creating pagination index: Index for workspace + updated_at pagination (all statuses)
+2026-02-28 22:58:18,008 - lightrag - INFO - Successfully created index: idx_lightrag_doc_status_workspace_updated_at
+2026-02-28 22:58:18,008 - lightrag - INFO - Creating pagination index: Index for workspace + created_at pagination (all statuses)
+2026-02-28 22:58:18,009 - lightrag - INFO - Successfully created index: idx_lightrag_doc_status_workspace_created_at
+2026-02-28 22:58:18,010 - lightrag - INFO - Creating pagination index: Index for workspace + file_path sorting
+2026-02-28 22:58:18,011 - lightrag - INFO - Successfully created index: idx_lightrag_doc_status_workspace_file_path
+2026-02-28 22:58:18,015 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_vdb_entity_gemini_embedding_001_768d_id on table LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-02-28 22:58:18,016 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_vdb_entity_gemini_embedding_001_768d_workspace_id on table LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-02-28 22:58:18,016 - lightrag - INFO - PostgreSQL: New table 'LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d' created successfully
+2026-02-28 22:58:18,017 - lightrag - INFO - Creating HNSW index idx_lightrag_vdb_entity_gemini_embedding_001_768d_hnsw_cosine on table LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-02-28 22:58:18,018 - lightrag - INFO - Successfully created vector index idx_lightrag_vdb_entity_gemini_embedding_001_768d_hnsw_cosine on table LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-02-28 22:58:18,018 - lightrag - INFO - Ensure this new table creation is caused by new workspace setup and not an unexpected embedding model change.
+2026-02-28 22:58:18,020 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_vdb_relation_gemini_embedding_001_768d_id on table LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-02-28 22:58:18,021 - lightrag - INFO - PostgreSQL, Creating composite index idx_5f39b2da3ebd_workspace_id on table LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-02-28 22:58:18,021 - lightrag - INFO - PostgreSQL: New table 'LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d' created successfully
+2026-02-28 22:58:18,022 - lightrag - INFO - Creating HNSW index idx_lightrag_vdb_relation_gemini_embedding_001_768d_hnsw_cosine on table LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-02-28 22:58:18,023 - lightrag - INFO - Successfully created vector index idx_lightrag_vdb_relation_gemini_embedding_001_768d_hnsw_cosine on table LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-02-28 22:58:18,023 - lightrag - INFO - Ensure this new table creation is caused by new workspace setup and not an unexpected embedding model change.
+2026-02-28 22:58:18,025 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_vdb_chunks_gemini_embedding_001_768d_id on table LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-02-28 22:58:18,026 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_vdb_chunks_gemini_embedding_001_768d_workspace_id on table LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-02-28 22:58:18,026 - lightrag - INFO - PostgreSQL: New table 'LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d' created successfully
+2026-02-28 22:58:18,027 - lightrag - INFO - Creating HNSW index idx_lightrag_vdb_chunks_gemini_embedding_001_768d_hnsw_cosine on table LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-02-28 22:58:18,028 - lightrag - INFO - Successfully created vector index idx_lightrag_vdb_chunks_gemini_embedding_001_768d_hnsw_cosine on table LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-02-28 22:58:18,028 - lightrag - INFO - Ensure this new table creation is caused by new workspace setup and not an unexpected embedding model change.
+2026-02-28 23:49:21,106 - lightrag - INFO - [1] Created new empty graph file: /Users/madhava/Developmemt/chatty_backend/rag/1/1/graph_chunk_entity_relation.graphml
+2026-02-28 23:49:21,106 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-02-28 23:49:21,106 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-02-28 23:49:21,106 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-02-28 23:49:21,107 - lightrag - INFO - PostgreSQL, Retry config: attempts=10, backoff=3.0s, backoff_max=30.0s, pool_close_timeout=5.0s
+2026-02-28 23:49:21,116 - lightrag - INFO - PostgreSQL, VECTOR extension enabled
+2026-02-28 23:49:21,124 - lightrag - INFO - PostgreSQL, Connected to database at localhost:5432/chatty without SSL
+2026-02-28 23:49:21,124 - lightrag - ERROR - PostgreSQL database, error:relation "lightrag_doc_full" does not exist
+2026-02-28 23:49:21,124 - lightrag - INFO - PostgreSQL, Try Creating table LIGHTRAG_DOC_FULL in database
+2026-02-28 23:49:21,129 - lightrag - INFO - PostgreSQL, Creation success table LIGHTRAG_DOC_FULL in PostgreSQL database
+2026-02-28 23:49:21,129 - lightrag - ERROR - PostgreSQL database, error:relation "lightrag_doc_chunks" does not exist
+2026-02-28 23:49:21,129 - lightrag - INFO - PostgreSQL, Try Creating table LIGHTRAG_DOC_CHUNKS in database
+2026-02-28 23:49:21,132 - lightrag - INFO - PostgreSQL, Creation success table LIGHTRAG_DOC_CHUNKS in PostgreSQL database
+2026-02-28 23:49:21,133 - lightrag - ERROR - PostgreSQL database, error:relation "lightrag_llm_cache" does not exist
+2026-02-28 23:49:21,133 - lightrag - INFO - PostgreSQL, Try Creating table LIGHTRAG_LLM_CACHE in database
+2026-02-28 23:49:21,135 - lightrag - INFO - PostgreSQL, Creation success table LIGHTRAG_LLM_CACHE in PostgreSQL database
+2026-02-28 23:49:21,136 - lightrag - ERROR - PostgreSQL database, error:relation "lightrag_doc_status" does not exist
+2026-02-28 23:49:21,136 - lightrag - INFO - PostgreSQL, Try Creating table LIGHTRAG_DOC_STATUS in database
+2026-02-28 23:49:21,139 - lightrag - INFO - PostgreSQL, Creation success table LIGHTRAG_DOC_STATUS in PostgreSQL database
+2026-02-28 23:49:21,139 - lightrag - ERROR - PostgreSQL database, error:relation "lightrag_full_entities" does not exist
+2026-02-28 23:49:21,139 - lightrag - INFO - PostgreSQL, Try Creating table LIGHTRAG_FULL_ENTITIES in database
+2026-02-28 23:49:21,141 - lightrag - INFO - PostgreSQL, Creation success table LIGHTRAG_FULL_ENTITIES in PostgreSQL database
+2026-02-28 23:49:21,142 - lightrag - ERROR - PostgreSQL database, error:relation "lightrag_full_relations" does not exist
+2026-02-28 23:49:21,142 - lightrag - INFO - PostgreSQL, Try Creating table LIGHTRAG_FULL_RELATIONS in database
+2026-02-28 23:49:21,144 - lightrag - INFO - PostgreSQL, Creation success table LIGHTRAG_FULL_RELATIONS in PostgreSQL database
+2026-02-28 23:49:21,145 - lightrag - ERROR - PostgreSQL database, error:relation "lightrag_entity_chunks" does not exist
+2026-02-28 23:49:21,145 - lightrag - INFO - PostgreSQL, Try Creating table LIGHTRAG_ENTITY_CHUNKS in database
+2026-02-28 23:49:21,147 - lightrag - INFO - PostgreSQL, Creation success table LIGHTRAG_ENTITY_CHUNKS in PostgreSQL database
+2026-02-28 23:49:21,147 - lightrag - ERROR - PostgreSQL database, error:relation "lightrag_relation_chunks" does not exist
+2026-02-28 23:49:21,147 - lightrag - INFO - PostgreSQL, Try Creating table LIGHTRAG_RELATION_CHUNKS in database
+2026-02-28 23:49:21,149 - lightrag - INFO - PostgreSQL, Creation success table LIGHTRAG_RELATION_CHUNKS in PostgreSQL database
+2026-02-28 23:49:21,156 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_doc_full_id on table LIGHTRAG_DOC_FULL
+2026-02-28 23:49:21,157 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_doc_full_workspace_id on table LIGHTRAG_DOC_FULL
+2026-02-28 23:49:21,158 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_doc_chunks_id on table LIGHTRAG_DOC_CHUNKS
+2026-02-28 23:49:21,159 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_doc_chunks_workspace_id on table LIGHTRAG_DOC_CHUNKS
+2026-02-28 23:49:21,160 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_llm_cache_id on table LIGHTRAG_LLM_CACHE
+2026-02-28 23:49:21,161 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_llm_cache_workspace_id on table LIGHTRAG_LLM_CACHE
+2026-02-28 23:49:21,162 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_doc_status_id on table LIGHTRAG_DOC_STATUS
+2026-02-28 23:49:21,162 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_doc_status_workspace_id on table LIGHTRAG_DOC_STATUS
+2026-02-28 23:49:21,163 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_full_entities_id on table LIGHTRAG_FULL_ENTITIES
+2026-02-28 23:49:21,164 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_full_entities_workspace_id on table LIGHTRAG_FULL_ENTITIES
+2026-02-28 23:49:21,164 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_full_relations_id on table LIGHTRAG_FULL_RELATIONS
+2026-02-28 23:49:21,165 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_full_relations_workspace_id on table LIGHTRAG_FULL_RELATIONS
+2026-02-28 23:49:21,165 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_entity_chunks_id on table LIGHTRAG_ENTITY_CHUNKS
+2026-02-28 23:49:21,166 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_entity_chunks_workspace_id on table LIGHTRAG_ENTITY_CHUNKS
+2026-02-28 23:49:21,166 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_relation_chunks_id on table LIGHTRAG_RELATION_CHUNKS
+2026-02-28 23:49:21,167 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_relation_chunks_workspace_id on table LIGHTRAG_RELATION_CHUNKS
+2026-02-28 23:49:21,172 - lightrag - INFO - chunk_id column already exists in LIGHTRAG_LLM_CACHE table
+2026-02-28 23:49:21,172 - lightrag - INFO - cache_type column already exists in LIGHTRAG_LLM_CACHE table
+2026-02-28 23:49:21,172 - lightrag - INFO - queryparam column already exists in LIGHTRAG_LLM_CACHE table
+2026-02-28 23:49:21,172 - lightrag - INFO - mode column does not exist in LIGHTRAG_LLM_CACHE table
+2026-02-28 23:49:21,174 - lightrag - INFO - chunks_list column already exists in LIGHTRAG_DOC_STATUS table
+2026-02-28 23:49:21,175 - lightrag - INFO - llm_cache_list column already exists in LIGHTRAG_DOC_CHUNKS table
+2026-02-28 23:49:21,179 - lightrag - INFO - track_id column already exists in LIGHTRAG_DOC_STATUS table
+2026-02-28 23:49:21,179 - lightrag - INFO - Creating index on track_id column for LIGHTRAG_DOC_STATUS table
+2026-02-28 23:49:21,180 - lightrag - INFO - Successfully created index on track_id column for LIGHTRAG_DOC_STATUS table
+2026-02-28 23:49:21,181 - lightrag - INFO - metadata column already exists in LIGHTRAG_DOC_STATUS table
+2026-02-28 23:49:21,182 - lightrag - INFO - error_msg column already exists in LIGHTRAG_DOC_STATUS table
+2026-02-28 23:49:21,182 - lightrag - INFO - Creating pagination index: Composite index for workspace + status + updated_at pagination
+2026-02-28 23:49:21,183 - lightrag - INFO - Successfully created index: idx_lightrag_doc_status_workspace_status_updated_at
+2026-02-28 23:49:21,183 - lightrag - INFO - Creating pagination index: Composite index for workspace + status + created_at pagination
+2026-02-28 23:49:21,184 - lightrag - INFO - Successfully created index: idx_lightrag_doc_status_workspace_status_created_at
+2026-02-28 23:49:21,185 - lightrag - INFO - Creating pagination index: Index for workspace + updated_at pagination (all statuses)
+2026-02-28 23:49:21,185 - lightrag - INFO - Successfully created index: idx_lightrag_doc_status_workspace_updated_at
+2026-02-28 23:49:21,186 - lightrag - INFO - Creating pagination index: Index for workspace + created_at pagination (all statuses)
+2026-02-28 23:49:21,186 - lightrag - INFO - Successfully created index: idx_lightrag_doc_status_workspace_created_at
+2026-02-28 23:49:21,187 - lightrag - INFO - Creating pagination index: Index for workspace + file_path sorting
+2026-02-28 23:49:21,187 - lightrag - INFO - Successfully created index: idx_lightrag_doc_status_workspace_file_path
+2026-02-28 23:49:21,190 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_vdb_entity_gemini_embedding_001_768d_id on table LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-02-28 23:49:21,191 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_vdb_entity_gemini_embedding_001_768d_workspace_id on table LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-02-28 23:49:21,191 - lightrag - INFO - PostgreSQL: New table 'LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d' created successfully
+2026-02-28 23:49:21,192 - lightrag - INFO - Creating HNSW index idx_lightrag_vdb_entity_gemini_embedding_001_768d_hnsw_cosine on table LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-02-28 23:49:21,193 - lightrag - INFO - Successfully created vector index idx_lightrag_vdb_entity_gemini_embedding_001_768d_hnsw_cosine on table LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-02-28 23:49:21,193 - lightrag - INFO - Ensure this new table creation is caused by new workspace setup and not an unexpected embedding model change.
+2026-02-28 23:49:21,194 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_vdb_relation_gemini_embedding_001_768d_id on table LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-02-28 23:49:21,195 - lightrag - INFO - PostgreSQL, Creating composite index idx_5f39b2da3ebd_workspace_id on table LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-02-28 23:49:21,195 - lightrag - INFO - PostgreSQL: New table 'LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d' created successfully
+2026-02-28 23:49:21,196 - lightrag - INFO - Creating HNSW index idx_lightrag_vdb_relation_gemini_embedding_001_768d_hnsw_cosine on table LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-02-28 23:49:21,197 - lightrag - INFO - Successfully created vector index idx_lightrag_vdb_relation_gemini_embedding_001_768d_hnsw_cosine on table LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-02-28 23:49:21,197 - lightrag - INFO - Ensure this new table creation is caused by new workspace setup and not an unexpected embedding model change.
+2026-02-28 23:49:21,198 - lightrag - INFO - PostgreSQL, Creating index idx_lightrag_vdb_chunks_gemini_embedding_001_768d_id on table LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-02-28 23:49:21,199 - lightrag - INFO - PostgreSQL, Creating composite index idx_lightrag_vdb_chunks_gemini_embedding_001_768d_workspace_id on table LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-02-28 23:49:21,199 - lightrag - INFO - PostgreSQL: New table 'LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d' created successfully
+2026-02-28 23:49:21,200 - lightrag - INFO - Creating HNSW index idx_lightrag_vdb_chunks_gemini_embedding_001_768d_hnsw_cosine on table LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-02-28 23:49:21,201 - lightrag - INFO - Successfully created vector index idx_lightrag_vdb_chunks_gemini_embedding_001_768d_hnsw_cosine on table LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-02-28 23:49:21,201 - lightrag - INFO - Ensure this new table creation is caused by new workspace setup and not an unexpected embedding model change.

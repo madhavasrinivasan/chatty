@@ -62,3 +62,7 @@ class llmrequest(BaseModel):
     question: str = Field(description="The question to ask the LLM")
     store_id: Optional[str] = None  # e.g. "store_126"; if None, uses store_{user.id}
     mode: Optional[str] = Field(default="hybrid", description="Query mode: naive, local, global, hybrid")
+
+
+class AddshopifyRequest(BaseModel):
+    store_name: str

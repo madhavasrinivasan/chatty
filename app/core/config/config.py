@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     shopify_api_key: str = Field(default="")
     shopify_api_secret: str = Field(default="")
     shopify_api_version: str = Field(default="2024-01")
+    shopify_callback_domain: str = Field(default="")  # e.g. https://your-app.com
 
     class Config:
         env_file = ".env"

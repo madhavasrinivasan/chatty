@@ -64,7 +64,7 @@ async def shutdown():
     # close_redis() 
 
 
-@app.get("/")
+@app.get("/api/auth/oauth/callback")
 async def root(request: Request):
     # Shopify hits GET / with ?shop=...&id_token=...; must return JSON, not HTML
     # shop = request.query_params.get("shop")

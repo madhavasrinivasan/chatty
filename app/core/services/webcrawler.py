@@ -315,7 +315,7 @@ You are a helpful AI assistant answering questions using ONLY the provided conte
         return rag 
     
     @staticmethod
-    async def insert_products_to_database(products_list: list, store_id: int):
+    async def insert_products_to_database(products_list: list, chatbot_id: int):
         try:
             # print(f"Products list: {products_list}")
             content_blob_array = []
@@ -324,7 +324,7 @@ You are a helpful AI assistant answering questions using ONLY the provided conte
             embeddings = await Services.vectiriseproductblob(content_blob_array)
             for product, embedding in zip(products_list, embeddings):
                 product["embedding"] = embedding
-            await AdminDbContoller().insert_products_to_database(products_list, store_id)
+            await AdminDbContoller().insert_products_to_database(products_list, chatbot_id)
                
 
         except Exception as e:
