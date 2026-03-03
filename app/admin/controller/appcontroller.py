@@ -16,6 +16,15 @@ from app.core.config.db import initialize_light_rag
 from lightrag import QueryParam
 from app.core.services.webcrawler import Services
 from app.core.config.config import settings
+from langchain_core.documents import Document as LangchainDocument
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from app.core.services.shopify_service import (
+    generate_shopify_install_url,
+    encrypt_token,
+    decrypt_token,
+    get_product_collections,
+    transform_shopify_product,
+)
 from app.core.models.models import ecom_store
 import bcrypt
 import base64
@@ -33,173 +42,6 @@ import binascii
 
 
 directory = settings.file_upload_directory_pdf
-
-
-def _generate_shopify_install_url(store_name: str) -> tuple[str, str]:
-    """
-    Generates the URL that sends the user to Shopify to approve your app.
-    Returns (install_url, state). Save state in DB/session to verify on callback.
-    """
-    clean_store = store_name.replace("https://", "").replace(".myshopify.com", "").strip()
-    scopes = [
-        "read_products",
-        "read_content",
-        "read_orders",
-        "read_inventory",
-    ]
-    callback_domain = (settings.shopify_callback_domain or "").rstrip("/")
-    redirect_uri = f"{callback_domain}" if callback_domain else ""
-    state = binascii.b2a_hex(os.urandom(15)).decode("utf-8")
-    session = shopify.Session(f"{clean_store}.myshopify.com", settings.shopify_api_version or "2024-04")
-    permission_url = session.create_permission_url(scopes, redirect_uri, state)
-    return permission_url, state
-
-
-def _encrypt_token(token: str) -> str:
-    """Encrypt a string (e.g. JWT) with AES-256-CBC; returns base64-encoded iv+ciphertext."""
-    key = hashlib.sha256((settings.secret_key or "default-secret").encode()).digest()
-    iv = get_random_bytes(16)
-    cipher = AES.new(key, AES.MODE_CBC, iv)
-    data = token.encode("utf-8")
-    ct = cipher.encrypt(pad(data, AES.block_size))
-    return base64.b64encode(iv + ct).decode("ascii")
-
-
-def _decrypt_token(encrypted: str) -> str:
-    """Decrypt a string produced by _encrypt_token; returns the original JWT/token string."""
-    key = hashlib.sha256((settings.secret_key or "default-secret").encode()).digest()
-    raw = base64.b64decode(encrypted)
-    iv, ct = raw[:16], raw[16:]
-    cipher = AES.new(key, AES.MODE_CBC, iv)
-    return unpad(cipher.decrypt(ct), AES.block_size).decode("utf-8")
-
-
-def get_product_collections(product_id) -> list[str]:
-    """
-    Fetches the names of all collections (Manual & Automated)
-    that a specific product belongs to. Critical for AI: e.g. user asks
-    "Show me your Liquid collection" — "Liquid" is in the collection name,
-    not necessarily in the product description.
-    """
-    collection_names: list[str] = []
-
-    # 1. Get "Custom" Collections (manual ones)
-    try:
-        custom_colls = shopify.CustomCollection.find(product_id=product_id)
-        if custom_colls:
-            items = custom_colls if isinstance(custom_colls, list) else [custom_colls]
-            collection_names.extend([str(c.title) for c in items if getattr(c, "title", None)])
-    except Exception:
-        pass
-
-    # 2. Get "Smart" Collections (automated ones based on tags/rules)
-    try:
-        smart_colls = shopify.SmartCollection.find(product_id=product_id)
-        if smart_colls:
-            items = smart_colls if isinstance(smart_colls, list) else [smart_colls]
-            collection_names.extend([str(c.title) for c in items if getattr(c, "title", None)])
-    except Exception:
-        pass
-
-    return list(set(collection_names))  # Remove duplicates
-
-
-def transform_shopify_product(raw_json: dict, collection_text: str = "") -> dict:
-    """
-    Flatten raw Shopify product JSON into a StoreKnowledge-friendly shape.
-    """
-    # 1. Clean the HTML description
-    soup = BeautifulSoup((raw_json.get("body_html") or ""), "html.parser")
-    clean_description = soup.get_text(separator=" ").strip()
-
-    # 2. Aggregate variants (price, stock, options)
-    variants = raw_json.get("variants") or []
-
-    prices: list[float] = []
-    total_stock = 0
-    for v in variants:
-        if not isinstance(v, dict):
-            continue
-        price_val = v.get("price")
-        if price_val is not None:
-            try:
-                prices.append(float(price_val))
-            except (TypeError, ValueError):
-                pass
-        qty = v.get("inventory_quantity")
-        if isinstance(qty, (int, float)):
-            total_stock += int(qty)
-
-    min_price = min(prices) if prices else 0.0
-
-    # Options text (e.g. colors/sizes)
-    option_values: list[str] = []
-    for option in raw_json.get("options") or []:
-        if not isinstance(option, dict):
-            continue
-        vals = option.get("values") or []
-        option_values.extend([str(v) for v in vals])
-    options_text = ", ".join(option_values)
-
-    # Collect SKUs from variants (for "model number" / SKU search)
-    skus: list[str] = []
-    for v in variants:
-        if not isinstance(v, dict):
-            continue
-        sku = v.get("sku")
-        if sku and str(sku).strip():
-            sku_str = str(sku).strip()
-            if sku_str not in skus:
-                skus.append(sku_str)
-    skus_text = ", ".join(skus) if skus else ""
-
-    # 3. Build the content blob the embedding model will see (includes collections for AI search)
-    title = raw_json.get("title") or ""
-    handle = raw_json.get("handle") or ""
-    tags = raw_json.get("tags") or ""
-    vendor = (raw_json.get("vendor") or "").strip()
-
-    parts = [title]
-    if clean_description:
-        parts.append(clean_description)
-    if vendor:
-        parts.append(f"Vendor: {vendor}.")
-    if options_text:
-        parts.append(f"Available Options: {options_text}.")
-    if skus_text:
-        parts.append(f"SKUs: {skus_text}.")
-    # Always add collections to content blob so AI can answer "show me your X collection"
-    parts.append(f"Collections: {collection_text if collection_text else 'None'}.")
-    if tags:
-        parts.append(f"Tags: {tags}")
-    content_blob = " ".join(parts).strip()
-
-    # 4. Content hash for change detection
-    content_hash = hashlib.md5(content_blob.encode("utf-8")).hexdigest()
-
-    # 5. First image URL (if any)
-    image_url = None
-    images = raw_json.get("images") or []
-    if images:
-        first = images[0] or {}
-        if isinstance(first, dict):
-            image_url = first.get("src")
-
-    # 6. Return flattened row
-    row = {
-        "shopify_product_id": str(raw_json.get("id") or ""),
-        "handle": handle,
-        "title": title,
-        "content": content_blob,
-        "price": min_price,
-        "stock": total_stock,
-        "image_url": image_url,
-        "variant_data": variants,
-        "content_hash": content_hash,
-    }
-    if collection_text:
-        row["collections"] = collection_text
-    return row
 
 
 class  AppController:
@@ -381,13 +223,106 @@ class  AppController:
    
 
 
-   
+    _CONTENT_SPLITTER = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=150)
+
+    @staticmethod
+    async def ingest_store_content(store_id: int):
+        """Ingest pages first (parse → split 5000/150 → embed → raw insert), then policies (same). Uses raw SQL only. Policy IDs use index when Shopify id is None."""
+        controller = AdminDbContoller()
+        splitter = AppController._CONTENT_SPLITTER
+        try:
+            print("📖 Ingesting Pages...")
+            pages = shopify.Page.find()
+            all_page_chunks = []
+            for page in pages:
+                body_html = getattr(page, "body_html", None) or ""
+                if not body_html.strip():
+                    continue
+                soup = BeautifulSoup(body_html, "html.parser")
+                clean_text = soup.get_text(separator=" ").strip()
+                title = getattr(page, "title", "Page") or "Page"
+                handle = (getattr(page, "handle", None) or "")[:255].replace(" ", "-").lower() or "page"
+                url = f"/pages/{getattr(page, 'handle', '') or ''}" or None
+                page_id = f"page_{getattr(page, 'id', id(page))}"
+                content = f"Page: {title}. Content: {clean_text}"
+                doc = LangchainDocument(page_content=content, metadata={"source_id": page_id, "handle": handle, "title": title, "url": url})
+                chunks = splitter.split_documents([doc])
+                for j, ch in enumerate(chunks):
+                    all_page_chunks.append({
+                        "source_id": f"{page_id}_c{j}",
+                        "handle": handle,
+                        "title": title,
+                        "content": ch.page_content,
+                        "url": url,
+                    })
+            if all_page_chunks:
+                texts = [r["content"] for r in all_page_chunks]
+                embeddings = await Services.generate_batch_embeddings(texts)
+                for i, row in enumerate(all_page_chunks):
+                    emb = embeddings[i] if i < len(embeddings) else None
+                    await controller.insert_store_knowledge_raw(
+                        store_id=store_id,
+                        shopify_product_id=row["source_id"],
+                        handle=row["handle"],
+                        title=row["title"],
+                        content=row["content"],
+                        data_type="page",
+                        url=row["url"],
+                        embedding=emb,
+                    )
+                print("✅ Pages ingestion complete.")
+        except Exception as e:
+            print(f"⚠️ Error ingesting pages: {e}")
+
+        # 2. Policies: get → parse → split (5000, 150) → embed → insert (raw). Use index when policy.id is None so each policy gets a unique id.
+        try:
+            print("📖 Ingesting Policies...")
+            policies = list(shopify.Policy.find())
+            all_policy_chunks = []
+            for idx, policy in enumerate(policies):
+                body = getattr(policy, "body", None) or ""
+                soup = BeautifulSoup(body, "html.parser")
+                clean_text = soup.get_text(separator=" ").strip()
+                title = getattr(policy, "title", "Policy") or "Policy"
+                handle = (title or "policy")[:255].replace(" ", "-").lower() or "policy"
+                url = getattr(policy, "url", None)
+                raw_id = getattr(policy, "id", None)
+                policy_id = f"policy_{raw_id}" if raw_id is not None else f"policy_{idx}"
+                content = f"Policy: {title}. Content: {clean_text}"
+                doc = LangchainDocument(page_content=content, metadata={"source_id": policy_id, "handle": handle, "title": title, "url": url})
+                chunks = splitter.split_documents([doc])
+                for j, ch in enumerate(chunks):
+                    all_policy_chunks.append({
+                        "source_id": f"{policy_id}_c{j}",
+                        "handle": handle,
+                        "title": title,
+                        "content": ch.page_content,
+                        "url": url,
+                    })
+            if all_policy_chunks:
+                texts = [r["content"] for r in all_policy_chunks]
+                embeddings = await Services.generate_batch_embeddings(texts)
+                for i, row in enumerate(all_policy_chunks):
+                    emb = embeddings[i] if i < len(embeddings) else None
+                    await controller.insert_store_knowledge_raw(
+                        store_id=store_id,
+                        shopify_product_id=row["source_id"],
+                        handle=row["handle"],
+                        title=row["title"],
+                        content=row["content"],
+                        data_type="policy",
+                        url=row["url"],
+                        embedding=emb,
+                    )
+                print("✅ Policies ingestion complete.")
+        except Exception as e:
+            print(f"⚠️ Error ingesting policies: {e}")
+
     @staticmethod
     async def get_products_background_task(chatbot_id: int, store_id: int , task_id: int):
         try:
             print(f"Getting products background task for chatbot: {chatbot_id}")
 
-            
             shop_details = await AdminDbContoller().find_one_ecom_store(chatbot_id=chatbot_id)
             if not shop_details or shop_details is None:
                 raise ApplicationError.SomethingWentWrong("Cannot find shopify store")
@@ -407,6 +342,9 @@ class  AppController:
                 print(f"✅ Success! Connected to shop: {shop.name}")
                 print(f"Currency: {shop.currency}")
 
+                # Ingest policies and pages first (uses current session)
+                await AppController.ingest_store_content(store_id=shop_details.id)
+
                 # Paginate through ALL products (Shopify returns 50 per page by default)
                 for page in PaginatedIterator(shopify.Product.find(limit=250)):
                     for product in page:
@@ -418,7 +356,6 @@ class  AppController:
                         clean_product = transform_shopify_product(raw, collection_text=collection_text)
                         products_list.append(clean_product)
 
-        
                         if len(products_list) >= 50:
                             await Services.insert_products_to_database(products_list, chatbot_id=chatbot_id)
                             products_list = []
@@ -611,7 +548,7 @@ class  AppController:
             })
             print(f"[addshopify] Generated JWT token: {token}")
 
-            encrypted_api_key = _encrypt_token(token)
+            encrypted_api_key = encrypt_token(token)
             print(f"[addshopify] Encrypted API key: {encrypted_api_key}")
 
             await AdminDbContoller().update_chatbot(chatbot_id.id, {"api_key": encrypted_api_key})
@@ -628,7 +565,7 @@ class  AppController:
                 store_id=None
             )
 
-            install_url, state = _generate_shopify_install_url(store_name)
+            install_url, state = generate_shopify_install_url(store_name)
             print(f"[addshopify] Generated install URL for {store_name}; state={state}")
 
             return APIResponse(

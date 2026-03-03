@@ -344,3 +344,48 @@ class AdminDbContoller:
         except Exception as e:
             print(f"Error inserting products to database: {e}")
             raise ApplicationError.InternalServerError("Cannot insert products to database")
+
+    async def insert_store_knowledge_raw(
+        self,
+        store_id: int,
+        shopify_product_id: str,
+        handle: str,
+        title: str,
+        content: str,
+        data_type: str,
+        url: str = None,
+        embedding: list = None,
+    ):
+        """Insert or update one store_knowledge row (e.g. page/policy) using raw SQL only. Matches store_knowledge table schema."""
+        try:
+            emb_json = json.dumps(embedding) if embedding and isinstance(embedding, list) else None
+            sql = """
+            INSERT INTO store_knowledge (
+                store_id, shopify_product_id, handle, title, content,
+                price, stock, image_url, variant_data, content_hash, url,
+                data_type, product_type, embedding
+            ) VALUES ($1, $2, $3, $4, $5, NULL, 0, NULL, NULL, NULL, $6, $7, NULL, $8::vector)
+            ON CONFLICT (shopify_product_id) DO UPDATE SET
+                handle = EXCLUDED.handle,
+                title = EXCLUDED.title,
+                content = EXCLUDED.content,
+                url = EXCLUDED.url,
+                data_type = EXCLUDED.data_type,
+                embedding = EXCLUDED.embedding
+            """
+            await self.connection.execute_query(
+                sql,
+                [
+                    store_id,
+                    shopify_product_id[:50],
+                    handle[:255] if handle else "unknown",
+                    title,
+                    content,
+                    url,
+                    data_type,
+                    emb_json if emb_json else None,
+                ],
+            )
+        except Exception as e:
+            print(f"Error insert_store_knowledge_raw: {e}")
+            raise ApplicationError.InternalServerError("Cannot insert store_knowledge")

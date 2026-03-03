@@ -44,6 +44,8 @@ class store_knowledge_data_type(str, Enum):
     product = "product"
     faq = "faq"
     manual = "manual"
+    policy = "policy"
+    page = "page"
 
 
 class product_type(str, Enum):
@@ -146,7 +148,7 @@ class store_knowledge(models.Model):
     id = fields.IntField(pk=True)
     data_type = fields.CharEnumField(store_knowledge_data_type) 
     store_id = fields.BigIntField()
-    shopify_product_id = fields.CharField(max_length=50, null=True, unique=True)  
+    shopify_product_id = fields.CharField(max_length=50, null=True, unique=True) 
     handle = fields.CharField(max_length=255)
     title = fields.TextField()
     content = fields.TextField()
@@ -155,6 +157,7 @@ class store_knowledge(models.Model):
     image_url = fields.TextField(null=True)
     variant_data = fields.JSONField(null=True)
     content_hash = fields.CharField(max_length=32, null=True)
+    url = fields.TextField(null=True)
     product_type = fields.CharEnumField(product_type ,null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
 
