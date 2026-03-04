@@ -16,6 +16,7 @@ import json
 from app.core.config.config import settings
 from app.core.schema.applicationerror import ApplicationError
 from app.core.models.dbontrollers.admindbcontroller import AdminDbContoller
+from app.core.schema.schema import StoreDNA
 client = genai.Client()
 
 
@@ -233,6 +234,68 @@ class Services():
         except Exception as e:
             print(f"Error vectorizing product blob: {e}")
             raise ApplicationError.InternalServerError("Cannot vectorize product blob")
+
+    @staticmethod
+    async def generate_store_dna_from_titles(store_id: int):
+        """
+        Build a lightweight 'store DNA' summary from product titles and the About page,
+        then store it on the ecom_store.store_dna column.
+        """
+        controller = AdminDbContoller()
+        try:
+            # 1. Sample up to 30 product titles for this store
+            products_qs = controller.models.store_knowledge.filter(
+                store_id=store_id,
+                data_type="product",
+            )
+            titles = await products_qs.limit(30).values_list("title", flat=True)
+
+            # 2. Get all 'About' page content (if any) and concatenate
+            about_qs = controller.models.store_knowledge.filter(
+                store_id=store_id,
+                data_type="page",
+                title__icontains="about",
+            )
+            about_pages = await about_qs.all()
+            about_chunks = []
+            for page in about_pages:
+                try:
+                    text = (page.content or "").strip()
+                except AttributeError:
+                    text = ""
+                if text:
+                    about_chunks.append(text)
+            about_text = "\n\n".join(about_chunks)
+
+            # 3. Prompt the model for DNA JSON
+            dna_prompt = f"""
+Please analyze this Shopify store.
+
+Product Titles: {', '.join(titles)}
+About Us: {about_text}
+"""
+            schema = StoreDNA.model_json_schema()
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=dna_prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "response_json_schema": schema,
+                },
+            )
+            raw_text = getattr(response, "text", None) or str(response)
+            dna_data = json.loads(raw_text)
+
+            dna_summary = dna_data.get("dna_summary", "")
+
+            # 4. Persist dna_summary on ecom_store for this store_id
+            if dna_summary:
+                await controller.update_store_dna(store_id=store_id, dna_summary=dna_summary)
+
+            return dna_data
+        except Exception as e:
+            print(f"Error generating store DNA: {e}")
+            raise ApplicationError.InternalServerError("Cannot generate store DNA")
 
 
     @staticmethod

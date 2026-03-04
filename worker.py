@@ -2,12 +2,13 @@ import asyncio
 import os
 
 # Set environment variable before any imports (macOS fork() safety)
-os.environ['OBJC_DISABLE_INITIALIZE_FORK_SAFETY'] = 'YES'
+os.environ["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "YES"
 
 from app.core.config.db import init_db
 from app.core.models.dbontrollers.admindbcontroller import AdminDbContoller
 from app.admin.controller.appcontroller import AppController
 from app.core import models as Models
+from app.core.services.webcrawler import Services
 
 
 async def process_background_tasks():
@@ -98,6 +99,28 @@ async def _process_one_task(controller: AdminDbContoller, task):
             print(f"Task {task.id} (get_products) completed successfully")
         except Exception as e:
             print(f"Error processing get_products task {task.id}: {e}")
+            await controller.update_background_task_status(
+                task.id,
+                Models.background_task_status.failed,
+                str(e),
+            )
+    elif task.task_type == "query_expander_context":
+        # Generate or refresh the store DNA (high-level store summary) for this store.
+        # We treat task.user_id as the ecom_store.id / store_knowledge.store_id.
+        print(f"Processing query_expander_context task {task.id}")
+        await controller.update_background_task_status(
+            task.id,
+            Models.background_task_status.running,
+        )
+        try:
+            await Services.generate_store_dna_from_titles(store_id=task.user_id)
+            await controller.update_background_task_status(
+                task.id,
+                Models.background_task_status.completed,
+            )
+            print(f"Task {task.id} (query_expander_context) completed successfully")
+        except Exception as e:
+            print(f"Error processing query_expander_context task {task.id}: {e}")
             await controller.update_background_task_status(
                 task.id,
                 Models.background_task_status.failed,

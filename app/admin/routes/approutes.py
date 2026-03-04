@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, Request, BackgroundTasks, Form, File, Up
 from app.admin.controller.appcontroller import AppController
 from app.core.schema.schemarespone import APIResponse
 from app.core.services.filehandler import FileHandler
-from app.core.schema.schema import UploadKnowledgeBaseRequest, AddshopifyRequest
-from app.core.schema.schema import llmrequest , llmresponse
+from app.core.schema.schema import UploadKnowledgeBaseRequest, AddshopifyRequest, OrchestratorRequest
+from app.core.schema.schema import llmrequest, llmresponse
 from typing import List, Optional
 
 adminapprouter = APIRouter(
@@ -41,10 +41,15 @@ async def upload_files(
     return await AppController.upload_knowledge_base(user, file_path, request, background_tasks) 
 
 @adminapprouter.post("/response", response_model=APIResponse)
-async def get_response(request:llmrequest, user: dict = Depends(AppController.validate_user)):
-    return await AppController.get_response(user, request) 
+async def get_response(request: llmrequest, user: dict = Depends(AppController.validate_user)):
+    return await AppController.get_response(user, request)
 
-@adminapprouter.get("/shopify-callback",response_model=APIResponse)
+@adminapprouter.post("/orchestrate", response_model=APIResponse)
+async def process_orchestrate(request: OrchestratorRequest, user: dict = Depends(AppController.validate_user)):
+    """Run the AI E-Commerce Orchestrator (IntentRouter + QueryExpander). Returns route and, for HYBRID, the expanded search payload."""
+    return await AppController.process_orchestrator_query(user, request)
+
+@adminapprouter.get("/shopify-callback", response_model=APIResponse)
 async def shopify_callback(request:Request):
     return await AppController.shopify_callback(request) 
 

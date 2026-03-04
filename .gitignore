@@ -13,3 +13,4 @@ shopifyscript.py
 # Virtual environments
 .venv
 .cursor
+updates/

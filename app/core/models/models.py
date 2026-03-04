@@ -38,6 +38,7 @@ class background_task_type(str, Enum):
     create_vectors = "create_vectors"
     get_products = "get_products"
     get_orders = "get_orders"
+    query_expander_context = "query_expander_context"
 
 
 class store_knowledge_data_type(str, Enum):
@@ -270,6 +271,7 @@ class ecom_store(models.Model):
     created_at = fields.DatetimeField(auto_now_add=True, null=True)
     updated_at = fields.DatetimeField(auto_now=True, null=True)
     store_type = fields.CharEnumField(ecom_store_type, null=True)
+    store_dna = fields.TextField(null=True)
     class Meta:
         table = "ecom_store"
         indexes = [

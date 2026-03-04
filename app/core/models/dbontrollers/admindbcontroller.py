@@ -290,6 +290,14 @@ class AdminDbContoller:
             print(f"Error creating ecom store: {e}")
             raise ApplicationError.InternalServerError("Cannot create ecom store")
 
+    async def update_store_dna(self, store_id: int, dna_summary: str):
+        """Update the store_dna column for a given ecom_store id."""
+        try:
+            await self.models.ecom_store.filter(id=store_id).update(store_dna=dna_summary)
+        except Exception as e:
+            print(f"Error updating store DNA: {e}")
+            raise ApplicationError.InternalServerError("Cannot update store DNA")
+
     async def insert_products_to_database(self, products_list: list, chatbot_id: int):
         """
         Insert a batch of products into store_knowledge.

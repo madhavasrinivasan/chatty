@@ -1,7 +1,7 @@
 from pickle import ADDITEMS
 from llama_index_instrumentation.span_handlers import null
 from app.core.models.dbontrollers.admindbcontroller import AdminDbContoller
-from app.core.schema.schema import RegisterRequest, LoginRequest,llmrequest, AddshopifyRequest
+from app.core.schema.schema import RegisterRequest, LoginRequest, llmrequest, AddshopifyRequest, OrchestratorRequest
 from app.core.schema.schemarespone import APIResponse
 from app.core.schema.applicationerror import ApplicationError
 from fastapi import Request, BackgroundTasks
@@ -18,6 +18,7 @@ from app.core.services.webcrawler import Services
 from app.core.config.config import settings
 from langchain_core.documents import Document as LangchainDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from app.core.services.ai_orchestrator import process_user_query as ai_process_user_query
 from app.core.services.shopify_service import (
     generate_shopify_install_url,
     encrypt_token,
@@ -413,13 +414,33 @@ class  AppController:
             error_message = getattr(e, "message", str(e))
             raise ApplicationError.SomethingWentWrong(error_message)
 
-    
+    @staticmethod
+    async def process_orchestrator_query(user: dict, request: OrchestratorRequest):
+        """
+        Runs the AI orchestrator (IntentRouter + QueryExpander). Resolves store_dna from
+        ecom_store when chatbot_id is provided; otherwise uses empty string.
+        """
+        store_dna = ""
+        if request.chatbot_id:
+            store = await AdminDbContoller().find_one_ecom_store(request.chatbot_id)
+            if store and getattr(store, "store_dna", None):
+                store_dna = store.store_dna or ""
+        chat_history = request.chat_history if request.chat_history is not None else []
+        pre_fetched = request.pre_fetched_orders if request.pre_fetched_orders is not None else {}
+        result = await ai_process_user_query(
+            message=request.message,
+            chat_history=chat_history,
+            pre_fetched_orders=pre_fetched,
+            store_dna=store_dna,
+        )
+        return APIResponse(
+            success=True,
+            message="Orchestrator result",
+            data=result,
+        )
+
     @staticmethod
     async def shopify_callback(request: Request):
-        """
-        OAuth callback: ?code=...&hmac=...&shop=...&state=...&timestamp=...
-        Exchange code for access_token, then update existing ecom_store (no create).
-        """
         try:
             # 1. Parse query params (OAuth redirect from Shopify)
             code = request.query_params.get("code")
@@ -499,12 +520,18 @@ class  AppController:
                 store_name=shop,
             )
 
-            # 6. Trigger get_products background task for this store
+            # 6. Trigger get_products and query_expander_context background tasks for this store
             if existing.chatbot_id and existing.user_id:
                 await AdminDbContoller().create_background_task(
                     user_id=existing.user_id,
                     chatbot_id=existing.chatbot_id,
                     task_type="get_products",
+                    task_data=None,
+                )
+                await AdminDbContoller().create_background_task(
+                    user_id=existing.id,  # treated as store_id for DNA generation
+                    chatbot_id=existing.chatbot_id,
+                    task_type="query_expander_context",
                     task_data=None,
                 )
 
