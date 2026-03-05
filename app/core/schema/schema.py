@@ -70,6 +70,10 @@ class OrchestratorRequest(BaseModel):
     chat_history: Optional[List[Any]] = Field(default_factory=list, description="Recent chat messages for context.")
     pre_fetched_orders: Optional[List[Any] | Dict[str, Any]] = Field(default_factory=dict, description="Pre-fetched order data for context.")
     chatbot_id: Optional[int] = Field(default=None, description="Chatbot/store to use; if set, store_dna is loaded from ecom_store.")
+    subscription_plan: Optional[str] = Field(
+        default="starter",
+        description="Subscription tier for this store/user (e.g. 'starter', 'enterprise').",
+    )
 
 
 class AddshopifyRequest(BaseModel):

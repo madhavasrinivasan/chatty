@@ -427,11 +427,20 @@ class  AppController:
                 store_dna = store.store_dna or ""
         chat_history = request.chat_history if request.chat_history is not None else []
         pre_fetched = request.pre_fetched_orders if request.pre_fetched_orders is not None else {}
+
+        # Derive subscription_plan from the database using the authenticated user id.
+        # The request body does NOT control the plan.
+        try:
+            subscription_plan = await AdminDbContoller().get_user_subscription_plan(user["id"])
+        except Exception:
+            subscription_plan = "starter"
+
         result = await ai_process_user_query(
             message=request.message,
             chat_history=chat_history,
             pre_fetched_orders=pre_fetched,
             store_dna=store_dna,
+            subscription_plan=subscription_plan,
         )
         return APIResponse(
             success=True,

@@ -90,6 +90,29 @@ class AdminDbContoller:
             print(f"Error finding user by id: {e}")
             raise ApplicationError.InternalServerError("Cannot find user by id")
 
+
+    async def get_user_subscription_plan(self, user_id: int) -> str:
+        """
+        Returns a normalized subscription plan string for a user.
+        - "enterprise" if the latest subscription pack is enterprise.
+        - "starter" for trial/starter/unknown or if no subscription record exists.
+        """
+        try:
+            sub = await self.models.subscriptions.filter(user_id=user_id).order_by("-created_at").first()
+            if not sub:
+                return "starter"
+
+            pack = getattr(sub, "pack", None)
+            if pack == self.models.subscription_pack.enterprise:
+                return "enterprise"
+
+            # Treat trial/starter/anything else as starter/basic tier
+            return "starter"
+        except Exception as e:
+            print(f"Error getting subscription plan for user {user_id}: {e}")
+            # Fallback safely to starter
+            return "starter"
+
     
     async def create_chatbot(self, body: dict):
         try:
