@@ -11,6 +11,7 @@ from Crypto.Util.Padding import pad, unpad
 from fastapi import Request
 from Crypto.Random import get_random_bytes
 from typing import List, Optional
+import asyncio
 from app.core.config import db as db_config
 from app.core.config.db import initialize_light_rag
 from lightrag import QueryParam
@@ -19,6 +20,7 @@ from app.core.config.config import settings
 from langchain_core.documents import Document as LangchainDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from app.core.services.ai_orchestrator import process_user_query as ai_process_user_query
+from app.core.services.database_executor import execute_search
 from app.core.services.shopify_service import (
     generate_shopify_install_url,
     encrypt_token,
@@ -26,7 +28,7 @@ from app.core.services.shopify_service import (
     get_product_collections,
     transform_shopify_product,
 )
-from app.core.models.models import ecom_store
+from app.core.models.models import ecom_store, store_knowledge
 import bcrypt
 import base64
 import time
@@ -275,49 +277,149 @@ class  AppController:
         except Exception as e:
             print(f"⚠️ Error ingesting pages: {e}")
 
-        # 2. Policies: get → parse → split (5000, 150) → embed → insert (raw). Use index when policy.id is None so each policy gets a unique id.
+        # 2. Policies: whole policy per row (no chunking), single embedding each. Policy.all() for Shopify API.
         try:
-            print("📖 Ingesting Policies...")
-            policies = list(shopify.Policy.find())
-            all_policy_chunks = []
-            for idx, policy in enumerate(policies):
-                body = getattr(policy, "body", None) or ""
+            print("📜 Ingesting Store Policies...")
+            try:
+                policies = shopify.Policy.all()
+            except AttributeError:
+                policies = list(shopify.Policy.find() or [])
+            for policy in policies:
+                body = getattr(policy, "body", "") or ""
+                if not body or len(body.strip()) < 10:
+                    continue
+                title = getattr(policy, "title", "Policy") or "Policy"
                 soup = BeautifulSoup(body, "html.parser")
                 clean_text = soup.get_text(separator=" ").strip()
-                title = getattr(policy, "title", "Policy") or "Policy"
-                handle = (title or "policy")[:255].replace(" ", "-").lower() or "policy"
-                url = getattr(policy, "url", None)
-                raw_id = getattr(policy, "id", None)
-                policy_id = f"policy_{raw_id}" if raw_id is not None else f"policy_{idx}"
-                content = f"Policy: {title}. Content: {clean_text}"
-                doc = LangchainDocument(page_content=content, metadata={"source_id": policy_id, "handle": handle, "title": title, "url": url})
-                chunks = splitter.split_documents([doc])
-                for j, ch in enumerate(chunks):
-                    all_policy_chunks.append({
-                        "source_id": f"{policy_id}_c{j}",
-                        "handle": handle,
-                        "title": title,
-                        "content": ch.page_content,
-                        "url": url,
-                    })
-            if all_policy_chunks:
-                texts = [r["content"] for r in all_policy_chunks]
-                embeddings = await Services.generate_batch_embeddings(texts)
-                for i, row in enumerate(all_policy_chunks):
-                    emb = embeddings[i] if i < len(embeddings) else None
-                    await controller.insert_store_knowledge_raw(
-                        store_id=store_id,
-                        shopify_product_id=row["source_id"],
-                        handle=row["handle"],
-                        title=row["title"],
-                        content=row["content"],
-                        data_type="policy",
-                        url=row["url"],
-                        embedding=emb,
-                    )
-                print("✅ Policies ingestion complete.")
+                full_content = f"Policy: {title}. Content: {clean_text}"
+                embedding = await Services.generate_embedding(full_content)
+                handle = title.lower().replace(" ", "-")
+                shopify_product_id = f"policy_{title.lower().replace(' ', '_')}"
+                url = f"/policies/{handle}"
+                await controller.insert_store_knowledge_raw(
+                    store_id=store_id,
+                    shopify_product_id=shopify_product_id,
+                    handle=handle,
+                    title=title,
+                    content=full_content,
+                    data_type="page",
+                    url=url,
+                    embedding=embedding,
+                )
+            print("✅ Policies ingestion complete.")
         except Exception as e:
             print(f"⚠️ Error ingesting policies: {e}")
+
+    @staticmethod
+    async def ingest_shopify_collections(store_id: int, shopify_domain: str, access_token: str):
+        """
+        Ingest Shopify custom + smart collections into store_knowledge as data_type="collection".
+        Uses Shopify python library (sync) via asyncio.to_thread to avoid blocking.
+        Stores only title/description/url and an embedding vector; upserts only when content_hash changes.
+        """
+        controller = AdminDbContoller()
+        print(f"Shopify domain collection: {shopify_domain}")
+
+        def _fetch_collections_sync():
+            with shopify.Session.temp(shopify_domain, "2024-01", access_token):
+                custom: list = []
+                smart: list = []
+                try:
+                    # PaginatedIterator yields pages (lists); flatten into a single list
+                    custom_pages = PaginatedIterator(shopify.CustomCollection.find(limit=250))
+                    for page in custom_pages:
+                        custom.extend(list(page))
+                except Exception:
+                    custom = list(shopify.CustomCollection.find() or [])
+                try:
+                    smart_pages = PaginatedIterator(shopify.SmartCollection.find(limit=250))
+                    for page in smart_pages:
+                        smart.extend(list(page))
+                except Exception:
+                    smart = list(shopify.SmartCollection.find() or [])
+                print(f"Custom collections: {custom}")
+                print(f"Smart collections: {smart}")
+                return custom + smart
+
+
+        try:
+            collections = await asyncio.to_thread(_fetch_collections_sync)
+        except Exception as e:
+            print(f"⚠️ Error fetching collections: {e}")
+            return
+
+        if not collections:
+            print("No collections found to ingest.")
+            return
+
+        pending = []
+        for col in collections:
+            col_id = getattr(col, "id", None)
+            if col_id is None:
+                continue
+            handle = getattr(col, "handle", "") or ""
+            title = getattr(col, "title", "") or "Collection"
+            body_html = getattr(col, "body_html", None)
+            if not body_html or not str(body_html).strip():
+                body_html = f"Explore the {title} collection"
+
+            soup = BeautifulSoup(str(body_html), "html.parser")
+            clean_text = soup.get_text(separator=" ").strip()
+            if not clean_text:
+                clean_text = f"Explore the {title} collection"
+
+            text_to_embed = f"Collection Title: {title}. Description: {clean_text}"
+            content_hash = hashlib.md5(text_to_embed.encode("utf-8")).hexdigest()
+
+            existing = await store_knowledge.filter(
+                store_id=store_id,
+                shopify_product_id=str(col_id),
+            ).first()
+            if existing and getattr(existing, "content_hash", None) == content_hash:
+                continue
+
+            pending.append(
+                {
+                    "shopify_product_id": str(col_id),
+                    "handle": handle,
+                    "title": title,
+                    "content": clean_text,
+                    "url": f"/collections/{handle}",
+                    "content_hash": content_hash,
+                    "text_to_embed": text_to_embed,
+                }
+            )
+
+        if not pending:
+            print("✅ Collections already up-to-date.")
+            return
+
+        try:
+            embeddings = await Services.generate_batch_embeddings([p["text_to_embed"] for p in pending])
+        except Exception as e:
+            print(f"⚠️ Error embedding collections: {e}")
+            return
+
+        for i, row in enumerate(pending):
+            emb = embeddings[i] if i < len(embeddings) else None
+            try:
+                await controller.insert_store_knowledge_raw(
+                    store_id=store_id,
+                    shopify_product_id=row["shopify_product_id"],
+                    handle=row["handle"],
+                    title=row["title"],
+                    content=row["content"],
+                    # DB stores this as "collect" (7 chars) to fit existing VARCHAR(7),
+                    # but the logical meaning is "collection".
+                    data_type="collect",
+                    url=row["url"],
+                    embedding=emb,
+                    content_hash=row["content_hash"],
+                )
+            except Exception as e:
+                print(f"⚠️ Error upserting collection {row.get('shopify_product_id')}: {e}")
+
+        print(f"✅ Collections ingestion complete. Upserted {len(pending)} collection rows.")
 
     @staticmethod
     async def get_products_background_task(chatbot_id: int, store_id: int , task_id: int):
@@ -343,8 +445,15 @@ class  AppController:
                 print(f"✅ Success! Connected to shop: {shop.name}")
                 print(f"Currency: {shop.currency}")
 
-                # Ingest policies and pages first (uses current session)
+                # Ingest pages and policies first (uses current session)
                 await AppController.ingest_store_content(store_id=shop_details.id)
+
+                # Then ingest collections (custom + smart) into store_knowledge as data_type="collection"
+                await AppController.ingest_shopify_collections(
+                    store_id=shop_details.id,
+                    shopify_domain=store_name.strip(),
+                    access_token=access_token,
+                )
 
                 # Paginate through ALL products (Shopify returns 50 per page by default)
                 for page in PaginatedIterator(shopify.Product.find(limit=250)):
@@ -418,18 +527,25 @@ class  AppController:
     async def process_orchestrator_query(user: dict, request: OrchestratorRequest):
         """
         Runs the AI orchestrator (IntentRouter + QueryExpander). Resolves store_dna from
-        ecom_store when chatbot_id is provided; otherwise uses empty string.
+        ecom_store when chatbot_id is provided. For HYBRID_SEARCH, runs execute_search
+        and attaches search_results to the response.
         """
         store_dna = ""
+        store_id = None
+        store = None
         if request.chatbot_id:
             store = await AdminDbContoller().find_one_ecom_store(request.chatbot_id)
-            if store and getattr(store, "store_dna", None):
+        if store is None and user.get("id"):
+            # Fallback: use first ecom_store for this user so execute_search can run
+            store = await AdminDbContoller().find_first_ecom_store_by_user_id(user["id"])
+        if store:
+            if getattr(store, "store_dna", None):
                 store_dna = store.store_dna or ""
+            store_id = store.id
         chat_history = request.chat_history if request.chat_history is not None else []
         pre_fetched = request.pre_fetched_orders if request.pre_fetched_orders is not None else {}
 
         # Derive subscription_plan from the database using the authenticated user id.
-        # The request body does NOT control the plan.
         try:
             subscription_plan = await AdminDbContoller().get_user_subscription_plan(user["id"])
         except Exception:
@@ -442,6 +558,21 @@ class  AppController:
             store_dna=store_dna,
             subscription_plan=subscription_plan,
         )
+        print(f"Result: {result}")
+
+        # When route is HYBRID_SEARCH, run the search against store_knowledge and attach results.
+        if (
+            result.get("route") == "HYBRID_SEARCH"
+            and result.get("search_payload")
+            and store_id is not None
+        ):
+            try:
+                rows = await execute_search(store_id=store_id, payload=result["search_payload"])
+                result["search_results"] = rows
+            except Exception as e:
+                print(f"Orchestrator execute_search error: {e}", flush=True)
+                result["search_results"] = []
+
         return APIResponse(
             success=True,
             message="Orchestrator result",

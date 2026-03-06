@@ -278,6 +278,14 @@ class AdminDbContoller:
             print(f"Error finding ecom store: {e}")
             raise ApplicationError.InternalServerError("Cannot find ecom store")
 
+    async def find_first_ecom_store_by_user_id(self, user_id: int):
+        """Return the first ecom_store for the given user (for default store when chatbot_id is not sent)."""
+        try:
+            return await self.models.ecom_store.filter(user_id=user_id).first()
+        except Exception as e:
+            print(f"Error finding ecom store by user: {e}")
+            return None
+
     async def find_one_ecom_store_by_shop(self, shop: str):
         """Find ecom_store by store domain (e.g. chatty-store-3.myshopify.com or chatty-store-3)."""
         try:
@@ -386,6 +394,7 @@ class AdminDbContoller:
         data_type: str,
         url: str = None,
         embedding: list = None,
+        content_hash: str = None,
     ):
         """Insert or update one store_knowledge row (e.g. page/policy) using raw SQL only. Matches store_knowledge table schema."""
         try:
@@ -395,13 +404,14 @@ class AdminDbContoller:
                 store_id, shopify_product_id, handle, title, content,
                 price, stock, image_url, variant_data, content_hash, url,
                 data_type, product_type, embedding
-            ) VALUES ($1, $2, $3, $4, $5, NULL, 0, NULL, NULL, NULL, $6, $7, NULL, $8::vector)
+            ) VALUES ($1, $2, $3, $4, $5, NULL, 0, NULL, NULL, $6, $7, $8, NULL, $9::vector)
             ON CONFLICT (shopify_product_id) DO UPDATE SET
                 handle = EXCLUDED.handle,
                 title = EXCLUDED.title,
                 content = EXCLUDED.content,
                 url = EXCLUDED.url,
                 data_type = EXCLUDED.data_type,
+                content_hash = EXCLUDED.content_hash,
                 embedding = EXCLUDED.embedding
             """
             await self.connection.execute_query(
@@ -412,6 +422,7 @@ class AdminDbContoller:
                     handle[:255] if handle else "unknown",
                     title,
                     content,
+                    content_hash,
                     url,
                     data_type,
                     emb_json if emb_json else None,

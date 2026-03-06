@@ -47,6 +47,8 @@ class store_knowledge_data_type(str, Enum):
     manual = "manual"
     policy = "policy"
     page = "page"
+    # Use a shorter DB value due to existing VARCHAR(7) column; "collect" is 7 chars.
+    collection = "collect"
 
 
 class product_type(str, Enum):

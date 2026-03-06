@@ -33,19 +33,19 @@ async def process_background_tasks():
             continue
 
         if pending_tasks:
+            print(f"Found {len(pending_tasks)} pending tasks. Executing simultaneously...", flush=True)
+
+            # Create a list to hold our concurrent jobs
+            concurrent_jobs = []
+
             for task in pending_tasks:
-                try:
-                    await _process_one_task(controller, task)
-                except Exception as e:
-                    print(f"Error processing task {task.id} (will continue to next): {e}")
-                    try:
-                        await controller.update_background_task_status(
-                            task.id,
-                            Models.background_task_status.failed,
-                            str(e),
-                        )
-                    except Exception as update_err:
-                        print(f"Failed to mark task {task.id} as failed: {update_err}")
+                # Fire the task into the background immediately
+                job = asyncio.create_task(_process_one_task(controller, task))
+                concurrent_jobs.append(job)
+
+            # Wait for all tasks in this batch to finish before polling again
+            # return_exceptions=True ensures if one completely crashes, the others still finish
+            await asyncio.gather(*concurrent_jobs, return_exceptions=True)
 
         # Always sleep then poll again (keeps loop running after each cycle)
         await asyncio.sleep(poll_interval)

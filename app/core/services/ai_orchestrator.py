@@ -150,11 +150,11 @@ CRITICAL RULES FOR NON-PRODUCT QUERIES (Policies, FAQs, About Us):
 - If the user asks about the store in general (e.g. "tell me about this store", "who are you"):
   - Set search_keywords to "about us, our story, store information".
   - Set semantic_context to "general information about the store, brand mission, and history".
-- If the user asks about policies (e.g. "return policy", "shipping times", "refunds"):
-  - Set search_keywords to "shipping, return, policy, refund".
-  - Set semantic_context to "details about shipping times, return policies, and customer guarantees".
-- For these non-product queries, always set rrf_weights.keyword_weight to 0.2 and rrf_weights.vector_weight to 0.8,
-  because they rely heavily on semantic matching against policy/about documents.
+- If the user asks about a specific policy (e.g. "shipping policy", "return policy"):
+  - Extract ONLY the exact policy requested for search_keywords (e.g. "shipping policy" or "return policy"). DO NOT output a comma-separated list of all policies.
+  - Set semantic_context to the user's intent (e.g. "details about shipping" or "return and refund conditions").
+  - Set rrf_weights.keyword_weight to 0.4 and rrf_weights.vector_weight to 0.6.
+- For other non-product queries (about us, store info), set keyword_weight to 0.2 and vector_weight to 0.8.
 
 RULES FOR PRODUCT QUERIES:
 - Extract the core product keywords for search_keywords (e.g. "running shoes", "espresso machine").
@@ -181,11 +181,11 @@ The JSON MUST match this schema:
   "semantic_context": "string",
   "sort_column": "price" | "rating" | "created_at" | null,
   "sort_order": "ASC" | "DESC" | null,
-  "limit": integer,
+  "limit": 20,
   "filters": {{"color": "string or null", "size": "string or null"}},
   "rrf_weights": {{"keyword_weight": float, "vector_weight": float}}
 }}
-
+- limit is default set to 20
 User message: {current_message}"""
 
 

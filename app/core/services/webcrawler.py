@@ -204,7 +204,11 @@ class Services():
             contents=[text],
             config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY", output_dimensionality=768)
         )
-        return response.embeddings.values
+        # response.embeddings is a list of embedding objects; take the first one's values
+        if not response.embeddings:
+            return []
+        emb = response.embeddings[0]
+        return list(emb.values) if hasattr(emb, "values") else []
 
     
     @staticmethod
