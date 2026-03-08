@@ -28,7 +28,7 @@ from app.core.services.shopify_service import (
     get_product_collections,
     transform_shopify_product,
 )
-from app.core.models.models import ecom_store, store_knowledge
+from app.core.models.models import ecom_store, store_knowledge, chatbot_settings
 import bcrypt
 import base64
 import time
@@ -445,6 +445,49 @@ class  AppController:
                 print(f"✅ Success! Connected to shop: {shop.name}")
                 print(f"Currency: {shop.currency}")
 
+                # Set app-reserved metafield on shop with chatbot api_key (for storefront/API use)
+                try:
+                    chatbot = await chatbot_settings.filter(id=chatbot_id).first()
+                    api_key_value = (chatbot.api_key or "").strip() if chatbot else ""
+                    if api_key_value:
+                        # Plain host for URL (e.g. store.myshopify.com)
+                        shop_host = (store_name or "").strip().replace("https://", "").replace("http://", "").split("/")[0]
+                        if not shop_host:
+                            shop_host = (
+                                f"{store_name.strip()}.myshopify.com"
+                                if ".myshopify.com" not in store_name
+                                else store_name.strip()
+                            )
+
+                        metafield_url = f"https://{shop_host}/admin/api/2026-01/metafields.json"
+
+                        data = {
+                            "metafield": {
+                                "namespace": "chatbot_settings",  # Updated to the working namespace
+                                "key": "api_key",
+                                "value": api_key_value,
+                                "type": "single_line_text_field",
+                            }
+                        }
+                        async with httpx.AsyncClient() as client:
+                            resp = await client.post(
+                                metafield_url,
+                                json=data,
+                                headers={
+                                    "X-Shopify-Access-Token": access_token,
+                                    "Content-Type": "application/json",
+                                },
+                                timeout=15.0,
+                            )
+                        if resp.status_code >= 400:
+                            print(f"⚠️ Metafield api_key set failed: {resp.status_code} {resp.text}")
+                        else:
+                            print("✅ Shop metafield api_key set successfully.")
+                    else:
+                        print("⚠️ No chatbot api_key to set on shop metafield.")
+                except Exception as metafield_err:
+                    print(f"⚠️ Error setting shop metafield api_key: {metafield_err}")
+
                 # Ingest pages and policies first (uses current session)
                 await AppController.ingest_store_content(store_id=shop_details.id)
 
@@ -557,8 +600,14 @@ class  AppController:
             pre_fetched_orders=pre_fetched,
             store_dna=store_dna,
             subscription_plan=subscription_plan,
+            store_name=store.store_name if store else None,
+            access_token=store.access_token if store else None,
         )
         print(f"Result: {result}")
+
+        # ORDER_SUPPORT: if prompting, return as-is; order_status is already set by orchestrator when order_id was present
+        if result.get("route") == "ORDER_SUPPORT":
+            return APIResponse(success=True, message="Orchestrator result", data=result)
 
         # When route is HYBRID_SEARCH, run the search against store_knowledge and attach results.
         if (

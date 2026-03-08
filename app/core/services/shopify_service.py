@@ -4,7 +4,7 @@ import base64
 import binascii
 import hashlib
 import os
-from typing import List
+from typing import Any, List
 
 import shopify
 from bs4 import BeautifulSoup
@@ -182,4 +182,47 @@ def transform_shopify_product(raw_json: dict, collection_text: str = "") -> dict
     if collection_text:
         row["collections"] = collection_text
     return row
+
+
+def get_order_status(shop_domain: str, access_token: str, order_id: str) -> dict[str, Any]:
+    print(f"Getting order status for {order_id} from {shop_domain}")
+    print(f"Access token: {access_token}")
+    """
+    Fetch order status from Shopify by order name/number (e.g. "#1001" or "1001").
+    Uses the store's session. Returns a dict with order details or error.
+    Sync; call via asyncio.to_thread from async code.
+    """
+    if not (order_id or "").strip():
+        return {"found": False, "message": "Order ID is required", "prompting": True}
+    order_id = (order_id or "").strip()
+    if not order_id.startswith("#"):
+        order_id = "#" + order_id
+    shop = shop_domain.strip()
+    if not shop.endswith(".myshopify.com"):
+        shop = f"{shop.replace('https://', '').split('.')[0]}.myshopify.com"
+    version = settings.shopify_api_version or "2024-01"
+    try:
+        with shopify.Session.temp(shop, version, access_token or ""):
+            # List recent orders and find by name (API doesn't filter by name server-side)
+            orders = shopify.Order.find(name=order_id, status="any")
+            if not orders:
+                return {"found": False, "message": "Order not found", "order_name": order_id}
+            # Handle both list and single result
+            order_list = orders if isinstance(orders, list) else list(orders)
+            for order in order_list:
+                name = getattr(order, "name", None) or ""
+                if str(name).strip().lower() == order_id.lower():
+                    return {
+                        "found": True,
+                        "order_name": name,
+                        "id": getattr(order, "id", None),
+                        "financial_status": getattr(order, "financial_status", None),
+                        "fulfillment_status": getattr(order, "fulfillment_status", None) or "unfulfilled",
+                        "total_price": getattr(order, "total_price", None),
+                        "created_at": str(getattr(order, "created_at", "")),
+                        "updated_at": str(getattr(order, "updated_at", "")),
+                    }
+            return {"found": False, "message": "Order not found", "order_name": order_id}
+    except Exception as e:
+        return {"found": False, "message": str(e), "order_name": order_id}
 

@@ -10,6 +10,7 @@ from google import genai
 
 from app.core.config.config import settings
 from app.core.schema.schema import IntentRoute, SearchPayload, SearchPayloadFilters
+from app.core.services.shopify_service import get_order_status
 
 _client: genai.Client | None = None
 
@@ -222,11 +223,13 @@ async def process_user_query(
     pre_fetched_orders: list | dict,
     store_dna: str,
     subscription_plan: str,
+    store_name: str | None = None,
+    access_token: str | None = None,
 ) -> dict[str, Any]:
     """
     Step 1: Call IntentRouter (chat_history, message) -> route + extracted_order_number.
     Step 2:
-      - ORDER_SUPPORT: return message "Triggering Shopify API for Order: [extracted_order_number]"
+      - ORDER_SUPPORT: if no order_id return prompting; if order_id and store credentials, call Shopify order status and return order_status.
       - GENERAL_CHAT: return a direct conversational response (Gemini).
       - HYBRID_SEARCH: call QueryExpander, return search_payload.
       - GRAPH_SEARCH / PARALLEL_SEARCH: placeholder.
@@ -255,10 +258,26 @@ async def process_user_query(
 
     # Step 2: Branch by route
     if route == "ORDER_SUPPORT":
-        order_str = extracted_order_number or ""
-        msg = f"Triggering Shopify API for Order: {order_str}"
-        print(msg, flush=True)
-        return {"route": "ORDER_SUPPORT", "extracted_order_number": extracted_order_number, "message": msg}
+        order_id = (extracted_order_number or "").strip()
+        if not order_id:
+            return {"route": "ORDER_SUPPORT", "message": "need orderId", "prompting": True}
+        # Order ID present: call Shopify API for order status when store credentials are provided
+        if store_name and access_token:
+            try:
+                order_status = await asyncio.to_thread(
+                    get_order_status,
+                    store_name,
+                    access_token,
+                    order_id,
+                )
+                return {"route": "ORDER_SUPPORT", "extracted_order_number": order_id, "order_status": order_status}
+            except Exception as e:
+                return {
+                    "route": "ORDER_SUPPORT",
+                    "extracted_order_number": order_id,
+                    "order_status": {"found": False, "message": str(e)},
+                }
+        return {"route": "ORDER_SUPPORT", "extracted_order_number": order_id}
 
     if route == "GENERAL_CHAT":
         reply = await asyncio.to_thread(
