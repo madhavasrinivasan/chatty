@@ -21,6 +21,7 @@ from langchain_core.documents import Document as LangchainDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from app.core.services.ai_orchestrator import process_user_query as ai_process_user_query
 from app.core.services.database_executor import execute_search
+from app.core.services.response_synthesis import generate_final_response
 from app.core.services.shopify_service import (
     generate_shopify_install_url,
     encrypt_token,
@@ -618,6 +619,21 @@ class  AppController:
             try:
                 rows = await execute_search(store_id=store_id, payload=result["search_payload"])
                 result["search_results"] = rows
+                # LLM synthesis + variant match + inventory check -> FinalFrontendResponse
+                try:
+                    final = await generate_final_response(
+                        user_query=request.message or "",
+                        hybrid_results=rows,
+                        shop_domain=store.store_name if store else "",
+                        db_session=None,
+                        access_token=store.access_token if store else "",
+                        store_id=store_id,
+                    )
+                    print(f"final: {final}")
+                    result["final_response"] = final.model_dump()
+                except Exception as syn_err:
+                    print(f"Response synthesis error: {syn_err}", flush=True)
+                    result["final_response"] = None
             except Exception as e:
                 print(f"Orchestrator execute_search error: {e}", flush=True)
                 result["search_results"] = []

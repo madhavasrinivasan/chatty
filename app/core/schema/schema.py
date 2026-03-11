@@ -136,3 +136,62 @@ class SearchPayload(BaseModel):
         default_factory=lambda: RRFWeights(keyword_weight=0.5, vector_weight=0.5),
         description="Weights for RRF: keyword_weight and vector_weight (must sum to 1.0).",
     )
+
+
+# --- LLM synthesis & frontend response (strict data contracts) ---
+
+
+class IntentToCart(BaseModel):
+    """Product selected by the LLM for the user. Use empty list for requested_options if no specific variant."""
+    product_id: str = Field(
+        description="e.g. gid://shopify/Product/123456789 or local store_knowledge id."
+    )
+    requested_options: List[str] = Field(
+        default_factory=list,
+        description="Variant options requested, e.g. ['Black', 'XL'] or ['Cotton', 'Slim Fit']. Empty [] if no specific variant.",
+    )
+
+
+class LLMSynthesisOutput(BaseModel):
+    """Schema forced on the LLM. Leave lists empty [] when not relevant to the user's query."""
+    general_answer: str = Field(
+        description="Answer in Markdown. Use safe phrasing when recommending products."
+    )
+    urls: List[str] = Field(
+        default_factory=list,
+        description="Links to policies, sizing guides, or collection pages. Empty [] if none."
+    )
+    selected_products: List[IntentToCart] = Field(
+        default_factory=list,
+        description="Products to show. Empty [] if the query is not product-related."
+    )
+    suggested_actions: List[str] = Field(
+        default_factory=list,
+        description="2-3 short follow-up questions for the UI."
+    )
+
+
+class FrontendProductCard(BaseModel):
+    """Hydrated product card for the React frontend."""
+    product_id: str = Field(description="Product identifier (GID or DB id).")
+    variant_id: str = Field(description="Resolved variant identifier.")
+    title: str = Field(description="Product title.")
+    price: str = Field(description="Display price string.")
+    currency: str = Field(description="Currency code, e.g. USD.")
+    image_url: str = Field(default="", description="Primary image URL.")
+    handle: str = Field(description="Product handle for URL.")
+    in_stock: bool = Field(description="True if variant is in stock.")
+
+
+class FinalFrontendResponse(BaseModel):
+    """Final JSON sent to the frontend after synthesis and hydration."""
+    general_answer: str = Field(description="Markdown answer, possibly updated for all-OOS.")
+    urls: List[str] = Field(default_factory=list, description="Policy/collection URLs.")
+    products: List[FrontendProductCard] = Field(
+        default_factory=list,
+        description="Hydrated product cards (only in-stock items).",
+    )
+    suggested_actions: List[str] = Field(
+        default_factory=list,
+        description="2-3 suggested follow-up questions.",
+    )

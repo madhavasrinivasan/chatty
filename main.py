@@ -116,6 +116,16 @@ async def root(request: Request):
     # return f"""<script>window.top.location.href = "{auth_url}";</script>"""
     return await AppController.shopify_callback(request)
 
+@app.post("/get_answer")
+async def get_answer(request:Request):
+    print(request.body)
+    print(request.headers.get("chatty-api-key"))
+    print(request.headers.get("chatty-shop-url"))
+    print(request.headers.get("chatty-customer-email"))
+    return {"message":"Answer fetched successfully"}
+
+
+
 
 @app.get("/api/auth/oauth/callback")
 async def shopify_callback(request:Request):
