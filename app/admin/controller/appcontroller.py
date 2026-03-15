@@ -1,7 +1,7 @@
 from pickle import ADDITEMS
 from llama_index_instrumentation.span_handlers import null
 from app.core.models.dbontrollers.admindbcontroller import AdminDbContoller
-from app.core.schema.schema import RegisterRequest, LoginRequest, llmrequest, AddshopifyRequest, OrchestratorRequest
+from app.core.schema.schema import RegisterRequest, LoginRequest, llmrequest, AddshopifyRequest, OrchestratorRequest, FinalFrontendResponse
 from app.core.schema.schemarespone import APIResponse
 from app.core.schema.applicationerror import ApplicationError
 from fastapi import Request, BackgroundTasks
@@ -29,8 +29,12 @@ from app.core.services.shopify_service import (
     get_product_collections,
     transform_shopify_product,
 )
-from app.core.models.models import ecom_store, store_knowledge, chatbot_settings
+from app.core.services.shopify_return_service import ShopifyReturnService
+from jose import jwt as jose_jwt
+from jose.exceptions import JWTError
+from app.core.models.models import ecom_store, store_knowledge, chatbot_settings, ChatTranscript
 import bcrypt
+import re
 import base64
 import time
 import os
@@ -80,7 +84,42 @@ class  AppController:
         except Exception as e:
             print(f"error validating user: {e}")
             error_message = getattr(e, 'message', str(e))
-            raise ApplicationError.Unauthorized(error_message)  
+            raise ApplicationError.Unauthorized(error_message)
+
+    @staticmethod
+    def decode_chatbot_api_key(api_key: str) -> dict:
+        """
+        Decrypt the API key (AES-encrypted JWT) and decode JWT to get user_id and chatbot_id.
+        Returns a dict suitable for process_orchestrator_query: {"id": user_id, "chatbot_id": chatbot_id}.
+        Raises ApplicationError.Unauthorized on invalid or expired key.
+        """
+        if not api_key or not api_key.strip():
+            raise ApplicationError.Unauthorized("Invalid or expired API key")
+        try:
+            jwt_string = decrypt_token(api_key.strip())
+            payload = jose_jwt.decode(
+                jwt_string,
+                settings.jwt_secret,
+                algorithms=[settings.jwt_algorithm],
+            )
+            user_id = payload.get("user_id")
+            chatbot_id = payload.get("chatbot_id")
+            if user_id is None or chatbot_id is None:
+                raise ApplicationError.Unauthorized("Invalid or expired API key")
+            return {"id": user_id, "chatbot_id": chatbot_id}
+        except (JWTError, ValueError, Exception) as e:
+            print(f"decode_chatbot_api_key error: {e}")
+            raise ApplicationError.Unauthorized("Invalid or expired API key")
+
+    @staticmethod
+    async def validate_chatbot_api_key(request: Request) -> dict:
+        """
+        FastAPI dependency: read x-api-key header, decode it, return user-like dict for process_orchestrator_query.
+        """
+        api_key = request.headers.get(settings.api_key_header) or request.headers.get("chatty-api-key")
+        if not api_key or not api_key.strip():
+            raise ApplicationError.Unauthorized("API key not found")
+        return AppController.decode_chatbot_api_key(api_key)
 
     
     @staticmethod
@@ -577,8 +616,9 @@ class  AppController:
         store_dna = ""
         store_id = None
         store = None
-        if request.chatbot_id:
-            store = await AdminDbContoller().find_one_ecom_store(request.chatbot_id)
+        chatbot_id = request.chatbot_id or user.get("chatbot_id")
+        if chatbot_id:
+            store = await AdminDbContoller().find_one_ecom_store(chatbot_id)
         if store is None and user.get("id"):
             # Fallback: use first ecom_store for this user so execute_search can run
             store = await AdminDbContoller().find_first_ecom_store_by_user_id(user["id"])
@@ -586,8 +626,75 @@ class  AppController:
             if getattr(store, "store_dna", None):
                 store_dna = store.store_dna or ""
             store_id = store.id
+
+        # Pre-router interceptor: SUBMIT_RETURN — submit return to Shopify, append to transcript, return success and exit
+        if request.action_payload and request.action_payload.get("action_type") == "SUBMIT_RETURN":
+            order_number = (request.action_payload.get("order_number") or "").strip()
+            items = request.action_payload.get("items") or []
+            if not order_number or not store or not getattr(store, "access_token", None):
+                return APIResponse(
+                    success=False,
+                    message="Missing order number or store credentials",
+                    data={"final_response": {"general_answer": "Unable to submit return: missing order or store configuration."}},
+                )
+            try:
+                return_svc = ShopifyReturnService(store.store_name or "", store.access_token or "")
+                submit_result = await return_svc.submit_return_request(order_number, items)
+            except Exception as e:
+                return APIResponse(
+                    success=False,
+                    message="Return submission failed",
+                    data={"final_response": {"general_answer": f"Sorry, we couldn't submit your return: {e!s}"}},
+                )
+            if not submit_result.get("ok"):
+                return APIResponse(
+                    success=False,
+                    message="Return submission failed",
+                    data={"final_response": {"general_answer": submit_result.get("error", "Return request failed.")}},
+                )
+            # Append user system message and assistant success message to active chat history in the database
+            user_system_msg = "[SYSTEM: User submitted return form]"
+            assistant_success_msg = "I have successfully submitted your return request!"
+            session_id = (request.session_id or "").strip()
+            existing_history = list(request.chat_history or [])
+            new_messages = [
+                {"role": "user", "content": user_system_msg},
+                {"role": "assistant", "content": assistant_success_msg},
+            ]
+            updated_history = existing_history + new_messages
+            if session_id:
+                transcript = await ChatTranscript.get_or_none(session_id=session_id)
+                if transcript:
+                    await transcript.update(raw_history=updated_history)
+                else:
+                    await ChatTranscript.create(
+                        session_id=session_id,
+                        store_id=store.id,
+                        user_email=None,
+                        raw_history=updated_history,
+                    )
+            final = FinalFrontendResponse(
+                general_answer=assistant_success_msg,
+                urls=[],
+                products=[],
+                suggested_actions=["Track another order?", "Browse products?"],
+                order_status=[],
+                return_ui_items=[],
+            )
+            return APIResponse(
+                success=True,
+                message="Return submitted",
+                data={"final_response": final.model_dump(), "route": "RETURN_REQUEST"},
+            )
+
         chat_history = request.chat_history if request.chat_history is not None else []
+        print(f"Chat history: {chat_history}")
         pre_fetched = request.pre_fetched_orders if request.pre_fetched_orders is not None else {}
+        print(f"Pre fetched: {pre_fetched}")
+        user_facts = (request.user_facts or "").strip()
+        print(f"User facts: {user_facts}")
+        order_history = (request.order_history or "").strip()
+        previous_session_history = (request.previous_session_history or "").strip()
 
         # Derive subscription_plan from the database using the authenticated user id.
         try:
@@ -603,14 +710,129 @@ class  AppController:
             subscription_plan=subscription_plan,
             store_name=store.store_name if store else None,
             access_token=store.access_token if store else None,
+            user_facts=user_facts,
+            order_history=order_history,
+            previous_session_history=previous_session_history,
         )
         print(f"Result: {result}")
 
-        # ORDER_SUPPORT: if prompting, return as-is; order_status is already set by orchestrator when order_id was present
+        # ORDER_SUPPORT: return in final_response format (same as others) with order_status populated when present
         if result.get("route") == "ORDER_SUPPORT":
-            return APIResponse(success=True, message="Orchestrator result", data=result)
+            order_status_payload = result.get("order_status")
+            order_status_list = [order_status_payload] if order_status_payload is not None else []
+            if result.get("prompting"):
+                general_answer = "Please share your order number so I can look it up."
+            elif order_status_list:
+                o = order_status_list[0] if isinstance(order_status_list[0], dict) else {}
+                if o.get("found"):
+                    general_answer = f"Here’s the status for order **{o.get('order_name', '')}**: {o.get('fulfillment_status', '')} (financial: {o.get('financial_status', '')})."
+                else:
+                    general_answer = o.get("message", "We couldn’t find that order. Please check the number and try again.")
+            else:
+                general_answer = "Please share your order number so I can look it up."
+            final = FinalFrontendResponse(
+                general_answer=general_answer,
+                urls=[],
+                products=[],
+                suggested_actions=["Track another order?", "Browse products?", "What’s my shipping status?"],
+                order_status=order_status_list,
+            )
+            result["final_response"] = final.model_dump()
 
-        # When route is HYBRID_SEARCH, run the search against store_knowledge and attach results.
+        # GENERAL_CHAT: return answer in final_response format (same shape as HYBRID_SEARCH) for consistent frontend
+        if result.get("route") == "GENERAL_CHAT":
+            conversational = result.get("conversational_response") or ""
+            final = FinalFrontendResponse(
+                general_answer=conversational,
+                urls=[],
+                products=[],
+                suggested_actions=[
+                    "What products do you have?",
+                    "Do you have a size guide?",
+                    "Can you help me find a gift?",
+                ],
+            )
+            result["final_response"] = final.model_dump()
+
+        # FOLLOW_UP_QUESTION: LLM asked for clarification; return in final_response format (same as ORDER_SUPPORT prompting / GENERAL_CHAT)
+        if result.get("route") == "FOLLOW_UP_QUESTION":
+            follow_up = result.get("follow_up_message") or "Could you tell me a bit more so I can help you better?"
+            final = FinalFrontendResponse(
+                general_answer=follow_up,
+                urls=[],
+                products=[],
+                suggested_actions=[],
+            )
+            result["final_response"] = final.model_dump()
+
+        # RETURN_REQUEST: Return Specialist reply; Output Interceptor for FETCH_ORDER, then CREATE_RETURN eligibility
+        if result.get("route") == "RETURN_REQUEST":
+            return_reply = result.get("return_specialist_response") or "I can help with returns. Please share your order number, the item, and the reason."
+            order_status_list = []
+            return_ui_items: List[dict] = []
+            return_order_number: Optional[str] = None
+
+            # Phase 1: Detect [ACTION:FETCH_ORDER | order: #<order_number>], fetch line items for UI, strip tag
+            fetch_order_match = re.search(
+                r"\[ACTION:FETCH_ORDER\s*\|\s*order:\s*#?([^\s\]|]+)\]",
+                return_reply,
+                re.IGNORECASE,
+            )
+            if fetch_order_match and store and getattr(store, "access_token", None):
+                order_number = (fetch_order_match.group(1) or "").strip()
+                return_order_number = f"#{order_number}" if order_number and not order_number.startswith("#") else order_number or None
+                try:
+                    return_svc = ShopifyReturnService(
+                        store.store_name or "",
+                        store.access_token or "",
+                    )
+                    return_ui_items = await return_svc.fetch_order_line_items_for_ui(order_number)
+                except Exception:
+                    return_ui_items = []
+                return_reply = re.sub(
+                    r"\[ACTION:FETCH_ORDER\s*\|\s*order:\s*#?[^\s\]|]*\]",
+                    "",
+                    return_reply,
+                    flags=re.IGNORECASE,
+                ).strip()
+
+            # CREATE_RETURN: submit return eligibility check
+            action_match = re.search(
+                r"\[ACTION:CREATE_RETURN\s*\|\s*order:\s*#?([^\s|]+)\s*\|\s*item:\s*(.+?)\s*\|\s*reason:\s*(.+)\]",
+                return_reply,
+                re.IGNORECASE | re.DOTALL,
+            )
+            if action_match and store and getattr(store, "access_token", None):
+                order_number = (action_match.group(1) or "").strip()
+                item_title = (action_match.group(2) or "").strip()
+                reason = (action_match.group(3) or "").strip()
+                try:
+                    return_svc = ShopifyReturnService(
+                        store.store_name or "",
+                        store.access_token or "",
+                    )
+                    eligibility = await return_svc.fetch_return_eligibility(order_number, item_title or None)
+                    order_status_list = [eligibility]
+                except Exception as e:
+                    order_status_list = [{"ok": False, "error": str(e)}]
+                return_reply = re.sub(
+                    r"\[ACTION:CREATE_RETURN\s*\|\s*order:\s*#?[^\s|]+\s*\|\s*item:\s*[^|]+\s*\|\s*reason:\s*[^\]]+\]",
+                    "",
+                    return_reply,
+                    flags=re.IGNORECASE | re.DOTALL,
+                ).strip()
+
+            final = FinalFrontendResponse(
+                general_answer=return_reply,
+                urls=[],
+                products=[],
+                suggested_actions=["Track another order?", "Browse products?"],
+                order_status=order_status_list,
+                return_ui_items=return_ui_items,
+                order_number=return_order_number,
+            )
+            result["final_response"] = final.model_dump()
+
         if (
             result.get("route") == "HYBRID_SEARCH"
             and result.get("search_payload")
@@ -628,6 +850,10 @@ class  AppController:
                         db_session=None,
                         access_token=store.access_token if store else "",
                         store_id=store_id,
+                        user_facts=user_facts,
+                        order_history=order_history,
+                        previous_session_history=previous_session_history,
+                        active_chat_history=chat_history,
                     )
                     print(f"final: {final}")
                     result["final_response"] = final.model_dump()

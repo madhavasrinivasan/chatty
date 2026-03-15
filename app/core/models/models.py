@@ -281,3 +281,40 @@ class ecom_store(models.Model):
             ("user_id",),
             ("chatbot_id",),
         ]
+
+
+# ============================
+# Dual-Memory chat (sessions + user facts)
+# ============================
+
+
+class ChatTranscript(models.Model):
+    """Stores full chat history per session for dual-memory architecture."""
+    session_id = fields.CharField(pk=True, max_length=255)
+    store_id = fields.IntField()
+    user_email = fields.CharField(max_length=255, null=True)
+    raw_history = fields.JSONField(default=list)  # list of {"role": "user"|"assistant", "content": "..."}
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "chat_transcript"
+        indexes = [
+            ("store_id",),
+            ("user_email",),
+        ]
+
+
+class UserMemorySummary(models.Model):
+    """Extracted permanent facts about a user (preferences, sizes, baby details, dislikes)."""
+    id = fields.IntField(pk=True)
+    user_email = fields.CharField(max_length=255)
+    store_id = fields.IntField()
+    fact = fields.TextField()
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "user_memory_summary"
+        indexes = [
+            ("user_email",),
+            ("store_id",),
+        ]

@@ -72,10 +72,12 @@ def _build_keyword_only_sql(
         order_dir = sort_order.upper()
         order_sql = f"ORDER BY {order_col} {order_dir} NULLS LAST"
     else:
-        order_sql = "ORDER BY ts_rank_cd(to_tsvector('english', title || ' ' || coalesce(content, '')), websearch_to_tsquery('english', $2)) DESC"
+        order_sql = "ORDER BY keyword_score DESC"
 
+    # websearch_to_tsquery understands Google-style OR, quotes, etc.; ts_rank gives keyword_score
     sql = f"""
-    SELECT id, title, content, price, url, image_url
+    SELECT id, title, content, price, url, image_url,
+           ts_rank(to_tsvector('english', title || ' ' || coalesce(content, '')), websearch_to_tsquery('english', $2)) AS keyword_score
     FROM store_knowledge
     WHERE store_id = $1
       AND data_type IN ('product', 'page', 'collect')
@@ -150,10 +152,11 @@ def _build_path_b_sql(
     sort_order: str | None,
     limit: int,
 ) -> tuple[str, list[Any]]:
-    """Path B: RRF hybrid. Empty keyword guard: if search_keywords empty, keyword CTE returns no rows."""
+    """Path B: RRF hybrid with dynamic sorting."""
     params: list[Any] = [store_id, vector_json]
     pos = 3
     filter_clauses = []
+    
     if filters:
         if filters.get("color"):
             filter_clauses.append(f" AND (variant_data IS NOT NULL AND (variant_data->>'color')::text ILIKE ${pos}) ")
@@ -163,35 +166,38 @@ def _build_path_b_sql(
             filter_clauses.append(f" AND (variant_data IS NOT NULL AND (variant_data->>'size')::text ILIKE ${pos}) ")
             params.append(f"%{filters['size']}%")
             pos += 1
+            
     filter_sql = "".join(filter_clauses)
 
     keyword_param_pos = pos if (search_keywords and search_keywords.strip()) else None
     if keyword_param_pos is not None:
         params.append(search_keywords.strip())
         pos += 1
+        
     vector_w_pos = pos
     params.append(vector_weight)
     pos += 1
+    
     keyword_w_pos = pos
     params.append(keyword_weight)
     pos += 1
+    
     limit_pos = pos
     params.append(limit)
 
-    # Keyword CTE: if no keywords, use WHERE 1=0 so we don't call plainto_tsquery('')
+    # Keyword CTE: websearch_to_tsquery for Google-style OR syntax
     if keyword_param_pos is not None:
         keyword_cte = f"""
     keyword_search AS (
         SELECT id, title, content, price, url, image_url,
-               ROW_NUMBER() OVER (ORDER BY ts_rank_cd(to_tsvector('english', title || ' ' || coalesce(content, '')), plainto_tsquery('english', ${keyword_param_pos})) DESC) as rank_k
+               ROW_NUMBER() OVER (ORDER BY ts_rank(to_tsvector('english', title || ' ' || coalesce(content, '')), websearch_to_tsquery('english', ${keyword_param_pos})) DESC) as rank_k
         FROM store_knowledge
         WHERE store_id = $1
-          AND to_tsvector('english', title || ' ' || coalesce(content, '')) @@ plainto_tsquery('english', ${keyword_param_pos})
+          AND to_tsvector('english', title || ' ' || coalesce(content, '')) @@ websearch_to_tsquery('english', ${keyword_param_pos})
           {filter_sql}
         LIMIT 40
     )"""
     else:
-        # Empty keyword CTE so plainto_tsquery is never called with empty string; same column shape for FULL OUTER JOIN
         keyword_cte = """
     keyword_search AS (
         SELECT id, title, content, price, url, image_url, 0::integer as rank_k
@@ -200,6 +206,23 @@ def _build_path_b_sql(
     )"""
 
     final_score_expr = f"( COALESCE(${vector_w_pos} * (1.0 / (60 + v.rank_v)), 0.0) + COALESCE(${keyword_w_pos} * (1.0 / (60 + k.rank_k)), 0.0) )"
+
+    # --- NEW DYNAMIC SORTING LOGIC ---
+    if sort_column == "price":
+        # Cast price to numeric for correct mathematical sorting, default to ASC if not specified
+        s_order = sort_order if sort_order in ["ASC", "DESC"] else "ASC"
+        # We fall back to final_score for tie-breakers
+        final_order_by = f"CAST(COALESCE(v.price, k.price) AS NUMERIC) {s_order}, {final_score_expr} DESC"
+        
+    elif sort_column in ["rating", "created_at"]:
+        # If you add these columns later, sort them here
+        s_order = sort_order if sort_order in ["ASC", "DESC"] else "DESC"
+        final_order_by = f"COALESCE(v.{sort_column}, k.{sort_column}) {s_order}, {final_score_expr} DESC"
+        
+    else:
+        # Default fallback: strictly sort by hybrid relevance score
+        final_order_by = f"{final_score_expr} DESC, COALESCE(v.id, k.id)"
+    # ---------------------------------
 
     sql = f"""
     WITH
@@ -225,11 +248,11 @@ def _build_path_b_sql(
         {final_score_expr} as final_score
     FROM vector_search v
     FULL OUTER JOIN keyword_search k ON v.id = k.id
-    ORDER BY {final_score_expr} DESC, COALESCE(v.id, k.id)
+    ORDER BY {final_order_by}
     LIMIT ${limit_pos}
     """
+    
     return sql, params
-
 
 class DatabaseExecutor:
     """Executes search against store_knowledge from QueryExpander payload."""

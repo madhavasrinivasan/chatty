@@ -17,7 +17,30 @@ class RegisterRequest(BaseModel):
 
 class LoginRequest(BaseModel):
     email: str
-    password: str 
+    password: str
+
+
+class ChatMessageEntry(BaseModel):
+    """Single message in chat history for session sync; assistant messages may include products, urls, order_status."""
+    role: str = Field(description="'user' or 'assistant'")
+    content: str = Field(default="", description="Message content")
+    products: Optional[List[Any]] = Field(default=None, description="Optional; assistant messages may include product cards.")
+    urls: Optional[List[str]] = Field(default=None, description="Optional; assistant messages may include URLs.")
+    order_status: Optional[List[Any]] = Field(default=None, description="Optional; assistant messages may include order status.")
+    suggested_actions: Optional[List[str]] = Field(default=None, description="Optional; assistant suggested follow-ups.")
+
+
+class SyncSessionRequest(BaseModel):
+    """Request to sync a chat session for dual-memory (transcript + optional fact extraction).
+    chat_history items: { role, content } for user; assistant may include products, urls, order_status, suggested_actions.
+    """
+    session_id: str = Field(description="Unique session identifier (PK for transcript).")
+    store_id: Optional[int] = Field(default=None, description="Store ID (e.g. ecom_store.id); required for fact extraction.")
+    user_email: Optional[str] = Field(default=None, description="User email; if set and history long enough, facts are extracted.")
+    chat_history: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Messages: { role, content } and optionally products, urls, order_status, suggested_actions per message.",
+    )
 
 
 class UploadKnowledgeBaseRequest(BaseModel):
@@ -65,15 +88,20 @@ class llmrequest(BaseModel):
 
 
 class OrchestratorRequest(BaseModel):
-    """Request for the AI E-Commerce Orchestrator (IntentRouter + QueryExpander)."""
+    """Request for the AI E-Commerce Orchestrator (chat endpoint: session_id, message, chat_history, optional action_payload)."""
+    session_id: Optional[str] = Field(default=None, description="Unique session identifier for the chat.")
     message: str = Field(description="Current user message to process.")
-    chat_history: Optional[List[Any]] = Field(default_factory=list, description="Recent chat messages for context.")
+    chat_history: Optional[List[Any]] = Field(default_factory=list, description="Recent chat messages for context (e.g. last 10).")
+    action_payload: Optional[Dict[str, Any]] = Field(default=None, description="Optional payload for pre-router actions (e.g. submitting return).")
     pre_fetched_orders: Optional[List[Any] | Dict[str, Any]] = Field(default_factory=dict, description="Pre-fetched order data for context.")
     chatbot_id: Optional[int] = Field(default=None, description="Chatbot/store to use; if set, store_dna is loaded from ecom_store.")
     subscription_plan: Optional[str] = Field(
         default="starter",
         description="Subscription tier for this store/user (e.g. 'starter', 'enterprise').",
     )
+    user_facts: Optional[str] = Field(default=None, description="Compiled permanent facts about the user (for router/expander/synthesizer).")
+    order_history: Optional[str] = Field(default=None, description="Formatted past orders string (for router/expander/synthesizer).")
+    previous_session_history: Optional[str] = Field(default=None, description="Summary of past chat sessions (for synthesizer).")
 
 
 class AddshopifyRequest(BaseModel):
@@ -89,12 +117,16 @@ class StoreDNA(BaseModel):
 
 class IntentRoute(BaseModel):
     """Strict JSON output for IntentRouter: which retrieval path to use."""
-    route: Literal["ORDER_SUPPORT", "GENERAL_CHAT", "HYBRID_SEARCH", "GRAPH_SEARCH", "PARALLEL_SEARCH"] = Field(
-        description="ORDER_SUPPORT: order/tracking/shipping. GENERAL_CHAT: greetings, off-topic. HYBRID_SEARCH: product search, pricing, policies. GRAPH_SEARCH: manual/PDF. PARALLEL_SEARCH: both product and manual."
+    route: Literal["ORDER_SUPPORT", "GENERAL_CHAT", "FOLLOW_UP_QUESTION", "RETURN_REQUEST", "HYBRID_SEARCH", "GRAPH_SEARCH", "PARALLEL_SEARCH"] = Field(
+        description="ORDER_SUPPORT: order/tracking/shipping. GENERAL_CHAT: greetings, off-topic. FOLLOW_UP_QUESTION: need clarification. RETURN_REQUEST: return item, refund, or exchange. HYBRID_SEARCH: product search, pricing, policies. GRAPH_SEARCH: manual/PDF. PARALLEL_SEARCH: both product and manual."
     )
     extracted_order_number: Optional[str] = Field(
         default=None,
         description="Order number if present (e.g. #1001), otherwise null.",
+    )
+    follow_up_message: Optional[str] = Field(
+        default=None,
+        description="When route is FOLLOW_UP_QUESTION, the clarifying question to ask the user (e.g. 'What size are you looking for?').",
     )
 
 
@@ -183,6 +215,14 @@ class FrontendProductCard(BaseModel):
     in_stock: bool = Field(description="True if variant is in stock.")
 
 
+class ReturnUIItem(BaseModel):
+    """Single line item for the return flow UI (id, title, image, quantity_returnable)."""
+    id: str = Field(description="e.g. gid://shopify/LineItem/...")
+    title: str = Field(description="Product/variant title.")
+    image: str = Field(default="", description="Image URL for the line item.")
+    quantity_returnable: int = Field(description="Quantity eligible for return.")
+
+
 class FinalFrontendResponse(BaseModel):
     """Final JSON sent to the frontend after synthesis and hydration."""
     general_answer: str = Field(description="Markdown answer, possibly updated for all-OOS.")
@@ -194,4 +234,16 @@ class FinalFrontendResponse(BaseModel):
     suggested_actions: List[str] = Field(
         default_factory=list,
         description="2-3 suggested follow-up questions.",
+    )
+    order_status: List[Any] = Field(
+        default_factory=list,
+        description="Order status payload(s); only populated when route is ORDER_SUPPORT, else [].",
+    )
+    return_ui_items: List[Any] = Field(
+        default_factory=list,
+        description="Return flow: line items for UI when [ACTION:FETCH_ORDER] is used; [{ id, title, image, quantity_returnable }].",
+    )
+    order_number: Optional[str] = Field(
+        default=None,
+        description="When return_ui_items is set, the order number (e.g. #1002) for use in action_payload.order_number on submit.",
     )

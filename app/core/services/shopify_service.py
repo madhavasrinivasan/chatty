@@ -28,8 +28,9 @@ def generate_shopify_install_url(store_name: str) -> tuple[str, str]:
         "read_orders",
         "read_inventory",
         "write_products",
-        "read_content",
         "read_locations",
+        "read_returns",   # required for returnableFulfillments query (return-eligible items)
+        "write_returns",  # required for returnRequest mutation (create return)
     ]
     callback_domain = (settings.shopify_callback_domain or "").rstrip("/")
     redirect_uri = f"{callback_domain}" if callback_domain else ""
@@ -225,4 +226,45 @@ def get_order_status(shop_domain: str, access_token: str, order_id: str) -> dict
             return {"found": False, "message": "Order not found", "order_name": order_id}
     except Exception as e:
         return {"found": False, "message": str(e), "order_name": order_id}
+
+
+def get_orders_by_customer_email(
+    shop_domain: str,
+    access_token: str,
+    customer_email: str,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """
+    Fetch recent orders for a customer by email. Returns list of dicts with order_name and line_items_summary.
+    Sync; call via asyncio.to_thread from async code.
+    """
+    if not (customer_email or "").strip():
+        return []
+    email = (customer_email or "").strip().lower()
+    shop = (shop_domain or "").strip()
+    if not shop.endswith(".myshopify.com"):
+        shop = f"{shop.replace('https://', '').split('.')[0]}.myshopify.com"
+    version = settings.shopify_api_version or "2024-01"
+    try:
+        with shopify.Session.temp(shop, version, access_token or ""):
+            # Fetch recent orders; API may not support filter by email, so we fetch and filter
+            orders = shopify.Order.find(limit=min(limit * 2, 100), status="any", order="created_at DESC")
+            order_list = orders if isinstance(orders, list) else list(orders)
+            result = []
+            for order in order_list:
+                if len(result) >= limit:
+                    break
+                order_email = (getattr(order, "email", None) or "").strip().lower()
+                if order_email != email:
+                    continue
+                order_name = getattr(order, "name", None) or ""
+                line_items = getattr(order, "line_items", None) or []
+                line_list = line_items if isinstance(line_items, list) else list(line_items)
+                titles = [getattr(li, "title", "") or "" for li in line_list[:10]]
+                summary = ", ".join(titles) if titles else "—"
+                result.append({"order_name": str(order_name), "line_items_summary": summary})
+            return result
+    except Exception as e:
+        print(f"get_orders_by_customer_email error: {e}")
+        return []
 

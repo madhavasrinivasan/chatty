@@ -169,6 +169,19 @@ def find_best_variant_match(
     return db_variants_array[0] if db_variants_array else None
 
 
+def _format_active_chat_for_synthesizer(active_chat_history: list[dict[str, Any]] | None) -> str:
+    """Format the full sliced active chat (up to 10 messages) for the synthesizer prompt."""
+    if not active_chat_history:
+        return ""
+    lines = []
+    for m in active_chat_history:
+        role = (m.get("role") or "user") if isinstance(m, dict) else "user"
+        content = (m.get("content") or "") if isinstance(m, dict) else str(m)
+        if content:
+            lines.append(f"{role}: {content}")
+    return "\n".join(lines) if lines else ""
+
+
 async def generate_final_response(
     user_query: str,
     hybrid_results: list[dict[str, Any]],
@@ -176,17 +189,20 @@ async def generate_final_response(
     db_session: Any,
     access_token: str = "",
     store_id: int | None = None,
+    user_facts: str = "",
+    order_history: str = "",
+    previous_session_history: str = "",
+    active_chat_history: list[dict[str, Any]] | None = None,
 ) -> FinalFrontendResponse:
     print(f"generate_final_response: {user_query}")
     """
     Top-to-bottom flow:
-    A) Single LLM call forcing LLMSynthesisOutput.
+    A) Single LLM call with full context (user_facts, order_history, previous_session_history, entire active chat).
     B) Build FinalFrontendResponse from LLM; if selected_products empty, return immediately.
     C) Concurrent get_variant_data_from_db + find_best_variant_match per product.
     D) Concurrent check_shopify_inventory_rest; only in-stock items go to products.
-        If all selected products end up omitted (OOS or match failed), append silent rewrite to general_answer.
     """
-    # Step A: LLM call (single pass) -> LLMSynthesisOutput
+    # Step A: LLM call (single pass) with memory context and full active session
     context = ""
     if hybrid_results:
         context = json.dumps(
@@ -204,7 +220,21 @@ async def generate_final_response(
             indent=2,
             default=str,
         )
-    prompt = f"""You are an e-commerce assistant. The user asked: "{user_query}".
+    memory_block = ""
+    if (user_facts or "").strip() or (order_history or "").strip() or (previous_session_history or "").strip():
+        memory_block = (
+            "USER FACTS: " + (user_facts or "").strip() + "\n"
+            "PAST ORDERS: " + (order_history or "").strip() + "\n"
+            "PAST CHATS: " + (previous_session_history or "").strip() + "\n\n"
+        )
+    active_block = _format_active_chat_for_synthesizer(active_chat_history)
+    if active_block:
+        memory_block += "ACTIVE SESSION (last 10 messages):\n" + active_block + "\n\n"
+    instruction = (
+        "Use the full context (active session, past chats, facts, and orders) to act as a highly personalized sales rep. "
+        "Acknowledge past conversations if relevant, and suggest items based on past orders (e.g., sizing up).\n\n"
+    )
+    prompt = f"""You are an e-commerce assistant. {instruction}{memory_block}Current user question: "{user_query}".
 
 Search results from our catalog (use these to answer and to pick products):
 {context}
@@ -214,6 +244,7 @@ Output a JSON object with this exact shape. Use empty lists [] when not relevant
 - urls: List of policy/sizing/collection URLs to show. Empty [] if none.
 - selected_products: List of {{ "product_id": "<id from results>", "requested_options": [] or e.g. ["Black","XL"] }}. Empty [] if not product-related.
 - suggested_actions: 2-3 short follow-up questions for the UI.
+- if there is product list and it related always addd to selected_products list , if not related then don't add to selected_products list. the max is 5 products.
 
 Output ONLY valid JSON, no markdown code block."""
 

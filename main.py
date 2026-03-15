@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn as uvicorn
 from fastapi.responses import HTMLResponse
 from app.admin.routes.index import approuter
+from app.admin.routes.sessionroutes import sessionrouter
 from app.core.schema.errorschema import register_exception_handlers 
 from contextlib import asynccontextmanager
 from app.admin.controller.appcontroller import AppController
@@ -43,7 +44,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(approuter) 
+app.include_router(approuter)
+# app.include_router(sessionrouter) 
 
 
 
