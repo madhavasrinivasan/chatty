@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # Google GenAI
     gemini_api_key: str
 
+    gemini_project: str
+    gemini_location: str = Field(default="asia-south1")
+
     # Shopify (for OAuth / token exchange)
     shopify_api_key: str = Field(default="")
     shopify_api_secret: str = Field(default="")
