@@ -214,6 +214,7 @@ async def generate_final_response(
                     "price": r.get("price"),
                     "url": r.get("url"),
                     "image_url": r.get("image_url"),
+                    "discount_info": r.get("discount_info"),
                 }
                 for r in hybrid_results[:20]
             ],
@@ -233,6 +234,9 @@ async def generate_final_response(
     instruction = (
         "Use the full context (active session, past chats, facts, and orders) to act as a highly personalized sales rep. "
         "Acknowledge past conversations if relevant, and suggest items based on past orders (e.g., sizing up).\n\n"
+        "If any product in the context has a non-empty `discount_info` list, you MUST mention that discount clearly in `general_answer` "
+        "(e.g. 'By the way, this item is 15% off right now with code X'). "
+        "When multiple products have discounts, highlight the one with the best discount.\n\n"
     )
     prompt = f"""You are an e-commerce assistant. {instruction}{memory_block}Current user question: "{user_query}".
 

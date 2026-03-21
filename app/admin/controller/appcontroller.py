@@ -32,7 +32,7 @@ from app.core.services.shopify_service import (
 from app.core.services.shopify_return_service import ShopifyReturnService
 from jose import jwt as jose_jwt
 from jose.exceptions import JWTError
-from app.core.models.models import ecom_store, store_knowledge, chatbot_settings, ChatTranscript
+from app.core.models.models import ecom_store, store_knowledge, chatbot_settings, ChatTranscript, ChatSession, ChatMessage
 import bcrypt
 import re
 import base64
@@ -462,7 +462,7 @@ class  AppController:
         print(f"✅ Collections ingestion complete. Upserted {len(pending)} collection rows.")
 
     @staticmethod
-    async def get_products_background_task(chatbot_id: int, store_id: int , task_id: int):
+    async def get_products_background_task(chatbot_id: int, store_id: int , task_id: int | None = None):
         try:
             print(f"Getting products background task for chatbot: {chatbot_id}")
 
@@ -476,6 +476,16 @@ class  AppController:
                 raise ApplicationError.SomethingWentWrong(
                     "Shopify store has no store name or access token; complete OAuth first."
                 )
+
+            # Mark indexing as in-progress for the admin sync view.
+            try:
+                await ecom_store.filter(id=shop_details.id).update(
+                    sync_status="syncing",
+                    last_synced_at=datetime.now(timezone.utc),
+                )
+            except Exception:
+                # Non-fatal: indexing still proceeds even if sync flags fail.
+                pass
 
             session = shopify.Session(store_name.strip(), "2024-04", access_token)
             shopify.ShopifyResource.activate_session(session)
@@ -556,17 +566,38 @@ class  AppController:
                 if products_list:
                     await Services.insert_products_to_database(products_list, chatbot_id=chatbot_id)
 
-                await AdminDbContoller().update_background_task_status(task_id, "completed", None)
+                if task_id is not None:
+                    await AdminDbContoller().update_background_task_status(task_id, "completed", None)
+
+                # Indexing complete.
+                try:
+                    await ecom_store.filter(id=shop_details.id).update(sync_status="idle")
+                except Exception:
+                    pass
             except Exception as e:
                 print(f"error getting products background task: {e}")
-                await AdminDbContoller().update_background_task_status(task_id, "failed" ,str(e))
+                if task_id is not None:
+                    await AdminDbContoller().update_background_task_status(task_id, "failed" ,str(e))
+                # Indexing failed.
+                try:
+                    await ecom_store.filter(id=shop_details.id).update(sync_status="failed")
+                except Exception:
+                    pass
                 raise ApplicationError.SomethingWentWrong(str(e) or "Something went wrong")
             finally:
                 shopify.ShopifyResource.clear_session()
 
         except Exception as e:
             print(f"error in get_products_background_task: {e}")
-            await AdminDbContoller().update_background_task_status(task_id, "failed" ,str(e))
+            if task_id is not None:
+                await AdminDbContoller().update_background_task_status(task_id, "failed" ,str(e))
+            # Ensure sync_status flips to failed even if the error happens early.
+            try:
+                # shop_details may be undefined here; best-effort only.
+                if "shop_details" in locals() and shop_details:
+                    await ecom_store.filter(id=shop_details.id).update(sync_status="failed")
+            except Exception:
+                pass
             raise ApplicationError.SomethingWentWrong(str(e) or "Something went wrong")
 
 
@@ -627,7 +658,7 @@ class  AppController:
                 store_dna = store.store_dna or ""
             store_id = store.id
 
-        # Pre-router interceptor: SUBMIT_RETURN — submit return to Shopify, append to transcript, return success and exit
+
         if request.action_payload and request.action_payload.get("action_type") == "SUBMIT_RETURN":
             order_number = (request.action_payload.get("order_number") or "").strip()
             items = request.action_payload.get("items") or []
@@ -739,7 +770,7 @@ class  AppController:
             )
             result["final_response"] = final.model_dump()
 
-        # GENERAL_CHAT: return answer in final_response format (same shape as HYBRID_SEARCH) for consistent frontend
+
         if result.get("route") == "GENERAL_CHAT":
             conversational = result.get("conversational_response") or ""
             final = FinalFrontendResponse(
@@ -840,6 +871,41 @@ class  AppController:
         ):
             try:
                 rows = await execute_search(store_id=store_id, payload=result["search_payload"])
+
+                # Enrich hybrid search results with discount_info when discounts were requested.
+                discounts = result.get("discounts") or []
+
+                def _matches_product(discount: dict, product_gid: str) -> bool:
+                    if not discount:
+                        return False
+                    entitled_products = discount.get("entitled_product_ids") or []
+                    if not entitled_products:
+                        # No explicit entitlements => treat as global (applies to all products)
+                        return True
+                    return product_gid in entitled_products
+
+                for row in rows:
+                    pid = str(row.get("shopify_product_id") or row.get("id") or "").strip()
+                    if not pid:
+                        continue
+                    row_discounts: list[dict] = []
+                    for d in discounts:
+                        try:
+                            if _matches_product(d, pid):
+                                row_discounts.append(
+                                    {
+                                        "code": d.get("code"),
+                                        "title": d.get("title"),
+                                        "type": d.get("type"),
+                                        "value": d.get("value"),
+                                        "currency": d.get("currency"),
+                                    }
+                                )
+                        except Exception:
+                            continue
+                    if row_discounts:
+                        row["discount_info"] = row_discounts
+
                 result["search_results"] = rows
                 # LLM synthesis + variant match + inventory check -> FinalFrontendResponse
                 try:
@@ -853,7 +919,7 @@ class  AppController:
                         user_facts=user_facts,
                         order_history=order_history,
                         previous_session_history=previous_session_history,
-                        active_chat_history=chat_history,
+                    active_chat_history=chat_history,
                     )
                     print(f"final: {final}")
                     result["final_response"] = final.model_dump()
@@ -1039,4 +1105,59 @@ class  AppController:
             print(f"error adding shopify: {e}")
             error_message = getattr(e, "message", str(e))
             raise ApplicationError.SomethingWentWrong(error_message)
+
+    # ============================
+    # Admin Live Chat - business orchestration
+    # ============================
+
+    @staticmethod
+    async def list_chat_sessions(user: dict):
+        sessions = await AdminDbContoller().list_active_chat_sessions_for_user(user["id"])
+        return APIResponse(success=True, message="Sessions fetched", data=sessions)
+
+    @staticmethod
+    async def list_chat_session_messages(user: dict, session_id: str):
+        from uuid import UUID as _UUID
+
+        try:
+            sid = _UUID(session_id)
+        except Exception:
+            raise ApplicationError.BadRequest("Invalid session_id")
+
+        messages = await AdminDbContoller().list_chat_messages_for_session_for_user(user_id=user["id"], session_id=sid)
+        if messages is None:
+            # Keep behavior consistent with existing controllers: raise application error.
+            raise ApplicationError.NotFound("Session not found")
+        return APIResponse(success=True, message="Messages fetched", data={"session_id": session_id, "messages": messages})
+
+    @staticmethod
+    async def get_sync_status(user: dict):
+        status = await AdminDbContoller().get_sync_status_for_user(user["id"])
+        return APIResponse(success=True, message="Sync status fetched", data=status)
+
+    @staticmethod
+    async def trigger_sync(user: dict, background_tasks: BackgroundTasks | None = None):
+        store = await AdminDbContoller().find_first_ecom_store_by_user_id(user["id"])
+        if not store:
+            raise ApplicationError.NotFound("No store found")
+        if not store.chatbot_id:
+            raise ApplicationError.BadRequest("Store has no chatbot_id")
+
+        now = datetime.now(timezone.utc)
+        await AdminDbContoller().set_store_sync_status(
+            store.id, last_synced_at=now, sync_status="syncing"
+        )
+
+        await AdminDbContoller().create_background_task(
+            user_id=store.user_id,
+            chatbot_id=store.chatbot_id,
+            task_data=None,
+            task_type="get_products",
+        )
+
+        return APIResponse(
+            success=True,
+            message="Sync enqueued",
+            data={"sync_status": "syncing", "last_synced_at": now.isoformat()},
+        )
         

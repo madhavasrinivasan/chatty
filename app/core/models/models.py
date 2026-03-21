@@ -1,5 +1,6 @@
 from tortoise import models, fields
 from enum import Enum
+import uuid
 
 
 class asset_type(str, Enum):
@@ -274,6 +275,8 @@ class ecom_store(models.Model):
     updated_at = fields.DatetimeField(auto_now=True, null=True)
     store_type = fields.CharEnumField(ecom_store_type, null=True)
     store_dna = fields.TextField(null=True)
+    last_synced_at = fields.DatetimeField(null=True)
+    sync_status = fields.CharField(max_length=20, default="idle")
     class Meta:
         table = "ecom_store"
         indexes = [
@@ -301,6 +304,45 @@ class ChatTranscript(models.Model):
         indexes = [
             ("store_id",),
             ("user_email",),
+        ]
+
+
+class ChatSession(models.Model):
+    """Live chat session (persisted per shop + customer or cart token)."""
+
+    id = fields.UUIDField(pk=True, default=uuid.uuid4)
+    shop_domain = fields.CharField(max_length=255, index=True)
+    customer_email = fields.CharField(max_length=255, null=True)
+    cart_token = fields.CharField(max_length=255, null=True)
+    status = fields.CharField(max_length=20, default="active")
+    created_at = fields.DatetimeField(auto_now_add=True)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "chat_sessions"
+        indexes = [
+            ("shop_domain",),
+            ("customer_email",),
+            ("cart_token",),
+            ("status",),
+            ("updated_at",),
+        ]
+
+
+class ChatMessage(models.Model):
+    """Single chat message belonging to a ChatSession."""
+
+    id = fields.UUIDField(pk=True, default=uuid.uuid4)
+    session = fields.ForeignKeyField("models.ChatSession", related_name="messages", on_delete=fields.CASCADE)
+    role = fields.CharField(max_length=20)  # "user" or "assistant"
+    content = fields.TextField()
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "chat_messages"
+        indexes = [
+            ("session",),
+            ("created_at",),
         ]
 
 

@@ -1,5 +1,5 @@
 import asyncio
-from fastapi import APIRouter, Depends, Request, BackgroundTasks, Form, File, UploadFile
+from fastapi import APIRouter, Depends, Request, BackgroundTasks, Form, File, UploadFile, HTTPException
 from app.admin.controller.appcontroller import AppController
 from app.core.schema.schemarespone import APIResponse
 from app.core.services.filehandler import FileHandler
@@ -11,10 +11,104 @@ from app.core.services.session_memory import (
     get_order_history_for_context,
 )
 from app.core.models.dbontrollers.admindbcontroller import AdminDbContoller
+from app.core.models.models import ChatSession, ChatMessage
 from typing import List, Optional
+import uuid as _uuid
+from uuid import UUID
+
 
 CHAT_HISTORY_MAX = 10
 CUSTOMER_EMAIL_HEADER = "chatty-customer-email"
+SHOP_DOMAIN_HEADER = "x-shop-domain"
+CUSTOMER_EMAIL_HEADER_ALT = "x-customer-email"
+CART_TOKEN_HEADER = "x-cart-token"
+
+
+def _normalize_shop_domain_header(value: str) -> str:
+    host = (value or "").strip().replace("https://", "").replace("http://", "").split("/")[0]
+    if not host:
+        return ""
+    if host.endswith(".myshopify.com"):
+        return host
+    return f"{host.split('.')[0]}.myshopify.com"
+
+
+async def get_or_create_session(
+    request: Request,
+    *,
+    provided_session_id: Optional[str] = None,
+) -> str:
+    """
+    Resolve an active ChatSession based on headers:
+    - x-shop-domain
+    - x-customer-email (fallback: chatty-customer-email)
+    - x-cart-token
+    If `provided_session_id` is present, prefer that session (create it if missing).
+    Returns session_id as a string.
+    """
+    shop_domain = _normalize_shop_domain_header(
+        (request.headers.get(SHOP_DOMAIN_HEADER) or request.headers.get("chatty-shop-url") or "").strip()
+    )
+    customer_email = (request.headers.get(CUSTOMER_EMAIL_HEADER_ALT) or request.headers.get(CUSTOMER_EMAIL_HEADER) or "").strip() or None
+    cart_token = (request.headers.get(CART_TOKEN_HEADER) or request.headers.get("chatty-cart-token") or "").strip() or None
+
+    # If frontend provides a session_id, prefer it.
+    if provided_session_id:
+        try:
+            sid = UUID(provided_session_id)
+            existing = await ChatSession.filter(id=sid).first()
+            if existing:
+                # Touch updated_at by updating status (Tortoise updates auto_now on update)
+                await ChatSession.filter(id=sid).update(status=existing.status)
+                return str(existing.id)
+            if not shop_domain:
+                # Can't create a session without knowing the shop domain.
+                raise ValueError("Missing shop_domain for ChatSession creation")
+            created = await ChatSession.create(
+                id=sid,
+                shop_domain=shop_domain,
+                customer_email=customer_email,
+                cart_token=cart_token,
+                status="active",
+            )
+            return str(created.id)
+        except Exception:
+            # Fall through to header-based creation.
+            pass
+
+    if not shop_domain:
+        raise HTTPException(status_code=400, detail="Missing x-shop-domain header (or chatty-shop-url fallback)")
+
+    # Find active session matching the user/cart identifiers available.
+    q = ChatSession.filter(shop_domain=shop_domain, status="active")
+    if customer_email and cart_token:
+        q = q.filter(customer_email=customer_email, cart_token=cart_token)
+    elif customer_email:
+        q = q.filter(customer_email=customer_email)
+    elif cart_token:
+        q = q.filter(cart_token=cart_token)
+    else:
+        # Without any identity headers, always create a fresh session.
+        created = await ChatSession.create(
+            shop_domain=shop_domain,
+            customer_email=None,
+            cart_token=None,
+            status="active",
+        )
+        return str(created.id)
+
+    existing = await q.order_by("-updated_at").first()
+    if existing:
+        await ChatSession.filter(id=existing.id).update(status=existing.status)
+        return str(existing.id)
+
+    created = await ChatSession.create(
+        shop_domain=shop_domain,
+        customer_email=customer_email,
+        cart_token=cart_token,
+        status="active",
+    )
+    return str(created.id)
 
 adminapprouter = APIRouter(
     prefix="/app",
@@ -70,8 +164,29 @@ async def process_orchestrate_chatbot(
     reads chatty-customer-email, fetches user_facts / previous_session_history / order_history
     concurrently when email present, then runs orchestrator with memory.
     """
-    chat_history = list(body.chat_history or [])[-CHAT_HISTORY_MAX:]
-    customer_email = (http_request.headers.get(CUSTOMER_EMAIL_HEADER) or "").strip()
+    # Resolve/create a persisted chat session from headers/front-end session_id.
+    resolved_session_id = await get_or_create_session(
+        http_request, provided_session_id=(body.session_id or None)
+    )
+    session_uuid = UUID(resolved_session_id)
+
+    # Persist the user's incoming message first.
+    await ChatMessage.create(
+        session_id=session_uuid,
+        role="user",
+        content=body.message,
+    )
+
+    # Load last N messages from DB for LLM context (chronological order).
+    recent_msgs = await ChatMessage.filter(session_id=session_uuid).order_by("-created_at").limit(CHAT_HISTORY_MAX)
+    recent_msgs_list = list(recent_msgs)[::-1]
+    chat_history = [{"role": m.role, "content": m.content} for m in recent_msgs_list]
+
+    customer_email = (
+        http_request.headers.get(CUSTOMER_EMAIL_HEADER_ALT)
+        or http_request.headers.get(CUSTOMER_EMAIL_HEADER)
+        or ""
+    ).strip()
 
     store = None
     chatbot_id = user.get("chatbot_id")
@@ -95,7 +210,7 @@ async def process_orchestrate_chatbot(
         )
 
     orchestrator_request = OrchestratorRequest(
-        session_id=body.session_id,
+        session_id=resolved_session_id,
         message=body.message,
         chat_history=chat_history,
         action_payload=body.action_payload,
@@ -106,7 +221,35 @@ async def process_orchestrate_chatbot(
         order_history=order_history or None,
         previous_session_history=previous_session_history or None,
     )
-    return await AppController.process_orchestrator_query(user, orchestrator_request)
+
+    api_resp = await AppController.process_orchestrator_query(user, orchestrator_request)
+
+    # Persist assistant message after response generation.
+    try:
+        result = api_resp.data or {}
+        final_response = result.get("final_response") or {}
+        assistant_text = (final_response.get("general_answer") or "").strip()
+        if assistant_text:
+            await ChatMessage.create(
+                session_id=session_uuid,
+                role="assistant",
+                content=assistant_text,
+            )
+    except Exception:
+        # Never fail the chat request due to persistence errors.
+        pass
+
+    return api_resp
+
+
+@adminapprouter.post("/chat", response_model=APIResponse)
+async def process_chat_alias(
+    http_request: Request,
+    body: OrchestratorRequest,
+    user: dict = Depends(AppController.validate_chatbot_api_key),
+):
+    """Alias for /orchestrate/chatbot."""
+    return await process_orchestrate_chatbot(http_request=http_request, body=body, user=user)
 
 @adminapprouter.get("/shopify-callback", response_model=APIResponse)
 async def shopify_callback(request:Request):

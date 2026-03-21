@@ -431,3 +431,97 @@ class AdminDbContoller:
         except Exception as e:
             print(f"Error insert_store_knowledge_raw: {e}")
             raise ApplicationError.InternalServerError("Cannot insert store_knowledge")
+
+    # ============================
+    # Live chat: sessions/messages
+    # ============================
+
+    def _normalize_shop_domain(self, value: str) -> str:
+        host = (value or "").strip().replace("https://", "").replace("http://", "").split("/")[0]
+        if not host:
+            return ""
+        if host.endswith(".myshopify.com"):
+            return host
+        return f"{host.split('.')[0]}.myshopify.com"
+
+    async def list_active_chat_sessions_for_user(self, user_id: int) -> list[dict]:
+        """
+        Live Chat admin view: list active sessions for the authenticated merchant's shop,
+        ordered by updated_at DESC. Includes a latest message snippet when possible.
+        """
+        store = await self.find_first_ecom_store_by_user_id(user_id)
+        if not store:
+            return []
+
+        shop_domain = self._normalize_shop_domain(store.store_name or "")
+        if not shop_domain:
+            return []
+
+        sessions = await self.models.ChatSession.filter(shop_domain=shop_domain, status="active").order_by("-updated_at").all()
+        out: list[dict] = []
+        for s in sessions:
+            last_msg = await self.models.ChatMessage.filter(session_id=s.id).order_by("-created_at").first()
+            snippet = ""
+            if last_msg and getattr(last_msg, "content", None):
+                snippet = str(last_msg.content)[:80]
+
+            out.append(
+                {
+                    "id": str(s.id),
+                    "shop_domain": s.shop_domain,
+                    "customer_email": s.customer_email,
+                    "cart_token": s.cart_token,
+                    "status": s.status,
+                    "created_at": s.created_at.isoformat() if s.created_at else None,
+                    "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+                    "latest_message_snippet": snippet,
+                }
+            )
+
+        return out
+
+    async def list_chat_messages_for_session_for_user(
+        self, *, user_id: int, session_id: "uuid.UUID"
+    ) -> list[dict] | None:
+        store = await self.find_first_ecom_store_by_user_id(user_id)
+        if not store:
+            return None
+
+        shop_domain = self._normalize_shop_domain(store.store_name or "")
+        if not shop_domain:
+            return None
+
+        session = await self.models.ChatSession.filter(id=session_id, shop_domain=shop_domain).first()
+        if not session:
+            return None
+
+        messages = await self.models.ChatMessage.filter(session_id=session.id).order_by("created_at").all()
+        return [
+            {
+                "id": str(m.id),
+                "role": m.role,
+                "content": m.content,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in messages
+        ]
+
+    # ============================
+    # LightRAG sync tracking
+    # ============================
+
+    async def get_sync_status_for_user(self, user_id: int) -> dict:
+        store = await self.find_first_ecom_store_by_user_id(user_id)
+        if not store:
+            return {"last_synced_at": None, "sync_status": "idle"}
+
+        return {
+            "last_synced_at": store.last_synced_at.isoformat() if store.last_synced_at else None,
+            "sync_status": store.sync_status,
+        }
+
+    async def set_store_sync_status(self, store_id: int, *, last_synced_at: datetime, sync_status: str) -> None:
+        await self.models.ecom_store.filter(id=store_id).update(
+            last_synced_at=last_synced_at,
+            sync_status=sync_status,
+        )

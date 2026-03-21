@@ -48,6 +48,7 @@ class IntentRouter:
         current_message: str,
         subscription_plan: str,
         order_history: str = "",
+        discounts_summary: str = "",
     ) -> dict[str, Any]:
         """
         Returns a dict with "route" (one of ORDER_SUPPORT, GENERAL_CHAT, HYBRID_SEARCH, GRAPH_SEARCH, PARALLEL_SEARCH)
@@ -55,7 +56,13 @@ class IntentRouter:
         The subscription_plan constrains which routes are allowed.
         Injects only the last 2 messages from chat_history and a brief order_history summary so the router can resolve "Where is my order?" / "Reorder my last item".
         """
-        prompt = _build_router_prompt(chat_history, current_message, subscription_plan, order_history)
+        prompt = _build_router_prompt(
+            chat_history,
+            current_message,
+            subscription_plan,
+            order_history,
+            discounts_summary=discounts_summary,
+        )
         try:
             client = _get_client()
             response = client.models.generate_content(
@@ -73,7 +80,12 @@ class IntentRouter:
                 order_num = data.get("extracted_order_number")
                 if order_num is not None and not isinstance(order_num, str):
                     order_num = str(order_num) if order_num else None
-                out = {"route": route, "extracted_order_number": order_num}
+                wants_discounts = bool(data.get("wants_discounts"))
+                out: dict[str, Any] = {
+                    "route": route,
+                    "extracted_order_number": order_num,
+                    "wants_discounts": wants_discounts,
+                }
                 if route == "FOLLOW_UP_QUESTION":
                     out["follow_up_message"] = (data.get("follow_up_message") or "").strip() or None
                 return out
@@ -95,6 +107,7 @@ class QueryExpander:
         user_facts: str = "",
         order_history: str = "",
         chat_history_snippet: list | None = None,
+        discounts_summary: str = "",
     ) -> dict[str, Any]:
         """
         Returns a dict matching SearchPayload shape. On failure, returns a safe default payload.
@@ -107,6 +120,7 @@ class QueryExpander:
             user_facts=user_facts or "",
             order_history=order_history or "",
             chat_history_snippet=chat_history_snippet or [],
+            discounts_summary=discounts_summary or "",
         )
         try:
             client = _get_client()
@@ -150,6 +164,7 @@ def _build_expander_prompt(
     user_facts: str = "",
     order_history: str = "",
     chat_history_snippet: list | None = None,
+    discounts_summary: str = "",
 ) -> str:
     memory_block = ""
     if (user_facts or "").strip() or (order_history or "").strip():
@@ -158,13 +173,16 @@ def _build_expander_prompt(
     if chat_history_snippet:
         last_2_3 = chat_history_snippet[-3:] if len(chat_history_snippet) > 3 else chat_history_snippet
         history_block = "Recent chat (last 2-3 messages): " + _format_chat_snippet(last_2_3, 3) + "\n\n"
+    discounts_block = ""
+    if (discounts_summary or "").strip():
+        discounts_block = "DISCOUNTS (authoritative):\n" + (discounts_summary or "").strip() + "\n\n"
     instruction = (
         "Use the chat history and past orders to understand what the user is referring to. "
         "Apply the USER FACTS to add automatic filters or negative exclusions (e.g. -cars) if the user has a stated dislike.\n\n"
     )
     return f"""You are an expert E-Commerce Query Expander for a store with the following DNA: {store_dna}
 
-{memory_block}{history_block}{instruction}Analyze the user's message to extract the core search intent, implied filters, sorting preferences, and the optimal Reciprocal Rank Fusion (RRF) weights.
+{memory_block}{history_block}{discounts_block}{instruction}Analyze the user's message to extract the core search intent, implied filters, sorting preferences, and the optimal Reciprocal Rank Fusion (RRF) weights.
 
 CRITICAL RULES FOR PRODUCT QUERIES:
 1. PRESERVE MODIFIERS: DO NOT drop important adjectives, colors, shapes, or specific identifiers from the keywords. 
@@ -211,6 +229,7 @@ def _build_router_prompt(
     current_message: str,
     subscription_plan: str,
     order_history: str = "",
+    discounts_summary: str = "",
 ) -> str:
     # Only last 2 messages so router can resolve pronouns (e.g. "Do you have that in blue?")
     history_snippet = ""
@@ -220,6 +239,9 @@ def _build_router_prompt(
     order_snippet = ""
     if (order_history or "").strip():
         order_snippet = "User's past orders (for intent 'Where is my order?' / 'Reorder my last item'): " + (order_history or "").strip()[:1500] + "\n\n"
+    discounts_snippet = ""
+    if (discounts_summary or "").strip():
+        discounts_snippet = "DISCOUNTS (authoritative):\n" + (discounts_summary or "").strip() + "\n\n"
     return f"""You are an Intent Router for an AI Agent. The current store is on the {subscription_plan} plan.
 
 Analyze the user's intent and choose the absolute first step, following these rules.
@@ -243,8 +265,9 @@ Output a JSON object with:
 - "route": exactly one of ORDER_SUPPORT, GENERAL_CHAT, FOLLOW_UP_QUESTION, RETURN_REQUEST, HYBRID_SEARCH, GRAPH_SEARCH, PARALLEL_SEARCH
 - "extracted_order_number": the order number if present (e.g. "#1001"), otherwise null
 - "follow_up_message": when route is FOLLOW_UP_QUESTION, a short friendly question to ask the user (e.g. "What size are you looking for?"); otherwise null
+- "wants_discounts": true if (and only if) the user is explicitly asking about discounts, coupons, offers, promo codes, sales, or deals; otherwise false
 
-{order_snippet}{history_snippet}Current user message: {current_message}"""
+{order_snippet}{discounts_snippet}{history_snippet}Current user message: {current_message}"""
 
 
 RETURN_SPECIALIST_SYSTEM = """You are a Return Specialist. Look at the user's PAST ORDERS.
@@ -321,6 +344,7 @@ async def process_user_query(
     user_facts: str = "",
     order_history: str = "",
     previous_session_history: str = "",
+    discounts_summary: str = "",
 ) -> dict[str, Any]:
     """
     Step 1: Call IntentRouter (last 2 of chat_history, message, order_history) -> route + extracted_order_number.
@@ -340,7 +364,9 @@ async def process_user_query(
             message or "",
             subscription_plan or "starter",
             order_history or "",
+            discounts_summary or "",
         )
+        print(f"route_result: {route_result}")
     except Exception:
         route_result = {"route": "HYBRID_SEARCH", "extracted_order_number": None}
 
@@ -400,6 +426,10 @@ async def process_user_query(
         )
         return {"route": "RETURN_REQUEST", "return_specialist_response": reply}
 
+    wants_discounts = bool(route_result.get("wants_discounts")) if isinstance(route_result, dict) else False
+
+    discounts: list[dict[str, Any]] = []
+
     if route == "HYBRID_SEARCH":
         chat_snippet = (chat_history or [])[-3:] if (chat_history or []) else []
         try:
@@ -410,10 +440,20 @@ async def process_user_query(
                 user_facts or "",
                 order_history or "",
                 chat_snippet,
+                discounts_summary or "",
             )
         except Exception:
             payload = _default_search_payload(message or "")
-        return {"route": "HYBRID_SEARCH", "search_payload": payload}
+        # If the router flagged discount intent and we have store credentials, fetch active discounts.
+        if wants_discounts and store_name and access_token:
+            try:
+                from app.core.services.shopify_service import get_active_discounts  # local import to avoid cycles
+
+                discounts = await get_active_discounts(store_name, access_token)
+                print(f"discounts: {discounts}")
+            except Exception:
+                discounts = []
+        return {"route": "HYBRID_SEARCH", "search_payload": payload, "discounts": discounts, "wants_discounts": wants_discounts}
 
     # GRAPH_SEARCH or PARALLEL_SEARCH
     print("GRAPH/PARALLEL execution coming soon", flush=True)

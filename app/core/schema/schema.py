@@ -128,6 +128,10 @@ class IntentRoute(BaseModel):
         default=None,
         description="When route is FOLLOW_UP_QUESTION, the clarifying question to ask the user (e.g. 'What size are you looking for?').",
     )
+    wants_discounts: Optional[bool] = Field(
+        default=False,
+        description="True when the user is explicitly asking about discounts/coupons/offers for this store or for specific products.",
+    )
 
 
 class SearchPayloadFilters(BaseModel):
@@ -213,6 +217,10 @@ class FrontendProductCard(BaseModel):
     image_url: str = Field(default="", description="Primary image URL.")
     handle: str = Field(description="Product handle for URL.")
     in_stock: bool = Field(description="True if variant is in stock.")
+    discount_info: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Optional list of discount metadata objects for this product (code, type, value, currency).",
+    )
 
 
 class ReturnUIItem(BaseModel):

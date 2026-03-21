@@ -6,6 +6,8 @@ import hashlib
 import os
 from typing import Any, List
 
+import httpx
+
 import shopify
 from bs4 import BeautifulSoup
 from Crypto.Cipher import AES
@@ -27,6 +29,7 @@ def generate_shopify_install_url(store_name: str) -> tuple[str, str]:
         "read_content",
         "read_orders",
         "read_inventory",
+        "read_discounts",
         "write_products",
         "read_locations",
         "read_returns",   # required for returnableFulfillments query (return-eligible items)
@@ -58,6 +61,408 @@ def decrypt_token(encrypted: str) -> str:
     cipher = AES.new(key, AES.MODE_CBC, iv)
     return unpad(cipher.decrypt(ct), AES.block_size).decode("utf-8")
 
+
+def _normalize_shop_domain(shop_domain: str) -> str:
+    host = (shop_domain or "").strip().replace("https://", "").replace("http://", "").split("/")[0]
+    if not host:
+        return ""
+    if host.endswith(".myshopify.com"):
+        return host
+    # Allow passing "storename" or "storename.myshopify.com"
+    return f"{host.split('.')[0]}.myshopify.com"
+
+
+async def fetch_active_discounts_summary(
+    shop_domain: str,
+    access_token: str,
+    *,
+    first: int = 25,
+    timeout_s: float = 10.0,
+) -> str:
+    """
+    Fetch ACTIVE discounts from Shopify via GraphQL Admin API `discountNodes`.
+
+    Notes:
+    - Requires the app to have the `read_discounts` scope and a token authorized with that scope.
+    - Intentionally does NOT fetch the actual discount codes; we only surface merchant-facing titles/summaries.
+    """
+    host = _normalize_shop_domain(shop_domain)
+    if not host or not (access_token or "").strip():
+        return ""
+    version = getattr(settings, "shopify_api_version", None) or "2026-01"
+    url = f"https://{host}/admin/api/{version}/graphql.json"
+
+    query = """
+    query DiscountNodes($first: Int!, $query: String!) {
+      discountNodes(first: $first, query: $query) {
+        edges {
+          node {
+            id
+            discount {
+              __typename
+              ... on DiscountCodeBasic { title summary status }
+              ... on DiscountAutomaticBasic { title summary status }
+              ... on DiscountCodeBxgy { title summary status }
+              ... on DiscountAutomaticBxgy { title summary status }
+              ... on DiscountCodeFreeShipping { title summary status }
+              ... on DiscountAutomaticFreeShipping { title summary status }
+              ... on DiscountAutomaticApp { title status }
+              ... on DiscountCodeApp { title status }
+            }
+          }
+        }
+      }
+    }
+    """.strip()
+
+    variables = {"first": int(first), "query": "status:active"}
+    headers = {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": access_token,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            resp = await client.post(url, json={"query": query, "variables": variables}, headers=headers)
+        if resp.status_code != 200:
+            return ""
+        payload = resp.json() if resp.content else {}
+        if not isinstance(payload, dict):
+            return ""
+        if payload.get("errors"):
+            return ""
+        data = payload.get("data") or {}
+        edges = (((data.get("discountNodes") or {}).get("edges")) or [])
+        if not isinstance(edges, list) or not edges:
+            return ""
+
+        lines: list[str] = []
+        for e in edges[: int(first)]:
+            node = e.get("node") if isinstance(e, dict) else None
+            disc = (node or {}).get("discount") if isinstance(node, dict) else None
+            if not isinstance(disc, dict):
+                continue
+            title = (disc.get("title") or "").strip()
+            status = (disc.get("status") or "").strip()
+            summary = (disc.get("summary") or "").strip()
+            dtype = (disc.get("__typename") or "").strip()
+            if not title and not summary:
+                continue
+            parts = []
+            if title:
+                parts.append(title)
+            if summary:
+                parts.append(summary)
+            if dtype:
+                parts.append(f"type={dtype}")
+            if status:
+                parts.append(f"status={status}")
+            lines.append("- " + " • ".join(parts))
+
+        if not lines:
+            return ""
+        return "ACTIVE DISCOUNTS:\n" + "\n".join(lines)
+    except Exception:
+        return ""
+
+
+async def get_active_discounts(
+    shop_domain: str,
+    access_token: str,
+    *,
+    first: int = 50,
+    timeout_s: float = 10.0,
+) -> list[dict[str, Any]]:
+    """
+    Tool-style helper: fetch ACTIVE code-based discounts plus their basic entitlements.
+
+    Returns a list of dicts shaped like:
+    {
+        "code": "SAVE10",
+        "title": "...",
+        "type": "percentage" | "amount" | "free_shipping" | "bxgy" | "app",
+        "value": 10.0,
+        "currency": "USD" | null,
+        "entitled_product_ids": ["gid://shopify/Product/123", ...],
+        "entitled_collection_ids": ["gid://shopify/Collection/456", ...],
+    }
+    """
+    host = _normalize_shop_domain(shop_domain)
+    if not host or not (access_token or "").strip():
+        return []
+    version = getattr(settings, "shopify_api_version", None) or "2026-01"
+    url = f"https://{host}/admin/api/{version}/graphql.json"
+
+    query = """
+    query ActiveCodeDiscounts($first: Int!, $query: String!) {
+      discountNodes(first: $first, query: $query) {
+        edges {
+          node {
+            id
+            discount {
+              __typename
+              ... on DiscountCodeBasic {
+                title
+                status
+                summary
+                codes(first: 5) { nodes { code } }
+                customerGets {
+                  value {
+                    __typename
+                    ... on DiscountPercentage { percentage }
+                    ... on DiscountAmount { amount { amount currencyCode } }
+                  }
+                  items {
+                    ... on DiscountProducts {
+                      products(first: 50) {
+                        nodes { id }
+                      }
+                    }
+                    ... on DiscountCollections {
+                      collections(first: 50) {
+                        nodes { id }
+                      }
+                    }
+                  }
+                }
+              }
+              ... on DiscountCodeBxgy {
+                title
+                status
+                summary
+                codes(first: 5) { nodes { code } }
+                customerBuys {
+                  items {
+                    ... on DiscountProducts {
+                      products(first: 50) {
+                        nodes { id }
+                      }
+                    }
+                    ... on DiscountCollections {
+                      collections(first: 50) {
+                        nodes { id }
+                      }
+                    }
+                  }
+                }
+                customerGets {
+                  value {
+                    __typename
+                    ... on DiscountPercentage { percentage }
+                    ... on DiscountAmount { amount { amount currencyCode } }
+                  }
+                  items {
+                    ... on DiscountProducts {
+                      products(first: 50) {
+                        nodes { id }
+                      }
+                    }
+                    ... on DiscountCollections {
+                      collections(first: 50) {
+                        nodes { id }
+                      }
+                    }
+                  }
+                }
+              }
+              ... on DiscountCodeFreeShipping {
+                title
+                status
+                summary
+                codes(first: 5) { nodes { code } }
+              }
+              ... on DiscountAutomaticBasic {
+                title
+                status
+                summary
+                customerGets {
+                  value {
+                    __typename
+                    ... on DiscountPercentage { percentage }
+                    ... on DiscountAmount { amount { amount currencyCode } }
+                  }
+                  items {
+                    ... on DiscountProducts {
+                      products(first: 50) {
+                        nodes { id }
+                      }
+                    }
+                    ... on DiscountCollections {
+                      collections(first: 50) {
+                        nodes { id }
+                      }
+                    }
+                  }
+                }
+              }
+              ... on DiscountAutomaticBxgy {
+                title
+                status
+                summary
+                customerBuys {
+                  items {
+                    ... on DiscountProducts {
+                      products(first: 50) {
+                        nodes { id }
+                      }
+                    }
+                    ... on DiscountCollections {
+                      collections(first: 50) {
+                        nodes { id }
+                      }
+                    }
+                  }
+                }
+                customerGets {
+                  value {
+                    __typename
+                    ... on DiscountPercentage { percentage }
+                    ... on DiscountAmount { amount { amount currencyCode } }
+                  }
+                  items {
+                    ... on DiscountProducts {
+                      products(first: 50) {
+                        nodes { id }
+                      }
+                    }
+                    ... on DiscountCollections {
+                      collections(first: 50) {
+                        nodes { id }
+                      }
+                    }
+                  }
+                }
+              }
+              ... on DiscountAutomaticFreeShipping {
+                title
+                status
+                summary
+              }
+            }
+          }
+        }
+      }
+    }
+    """.strip()
+
+    variables = {"first": int(first), "query": "status:active"}
+    headers = {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": access_token,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            resp = await client.post(url, json={"query": query, "variables": variables}, headers=headers)
+        if resp.status_code != 200:
+            return []
+        payload = resp.json() if resp.content else {}
+        if not isinstance(payload, dict) or payload.get("errors"):
+            return []
+        data = payload.get("data") or {}
+        edges = (((data.get("discountNodes") or {}).get("edges")) or [])
+        if not isinstance(edges, list):
+            return []
+
+        out: list[dict[str, Any]] = []
+        for e in edges[: int(first)]:
+            node = e.get("node") if isinstance(e, dict) else None
+            disc = (node or {}).get("discount") if isinstance(node, dict) else None
+            if not isinstance(disc, dict):
+                continue
+            dtype = str(disc.get("__typename") or "")
+            title = str(disc.get("title") or "").strip()
+            # Be forgiving: some union variants may omit status in practice.
+            status = str(disc.get("status") or "").strip().upper()
+            if status and status != "ACTIVE":
+                continue
+            # Codes exist only for code-based discounts; automatic discounts have none.
+            codes: list[str | None] = []
+            codes_block = disc.get("codes")
+            if isinstance(codes_block, dict):
+                code_nodes = codes_block.get("nodes") or []
+                for cn in code_nodes:
+                    c = (cn or {}).get("code")
+                    if c and str(c).strip():
+                        codes.append(str(c).strip())
+            if not codes:
+                # For automatic discounts, we still want one logical entry (code=None).
+                codes = [None]
+
+            customer_gets = disc.get("customerGets") or {}
+            value = customer_gets.get("value") or {}
+            v_type = str(value.get("__typename") or "")
+            amount_value: float | None = None
+            currency: str | None = None
+            logical_type = "app"
+            if v_type == "DiscountPercentage":
+                try:
+                    amount_value = float(value.get("percentage") or 0.0)
+                except (TypeError, ValueError):
+                    amount_value = None
+                logical_type = "percentage"
+            elif v_type == "DiscountAmount":
+                amount = (value.get("amount") or {}) if isinstance(value.get("amount"), dict) else value.get("amount")
+                if isinstance(amount, dict):
+                    try:
+                        amount_value = float(amount.get("amount") or 0.0)
+                    except (TypeError, ValueError):
+                        amount_value = None
+                    currency = str(amount.get("currencyCode") or "") or None
+                logical_type = "amount"
+            elif "FreeShipping" in dtype:
+                logical_type = "free_shipping"
+
+            items = customer_gets.get("items") or {}
+            entitled_products: list[str] = []
+            entitled_collections: list[str] = []
+            # AllDiscountItems -> applies to all products; leave entitlements empty to signal global.
+            products_block = items.get("products") if isinstance(items, dict) else None
+            if isinstance(products_block, dict):
+                p_nodes = (products_block.get("nodes") or []) if isinstance(products_block.get("nodes"), list) else products_block.get("nodes") or []
+                for pn in p_nodes:
+                    if pn and str(pn).strip():
+                        entitled_products.append(str(pn).strip())
+            collections_block = items.get("collections") if isinstance(items, dict) else None
+            if isinstance(collections_block, dict):
+                c_nodes = (collections_block.get("nodes") or []) if isinstance(collections_block.get("nodes"), list) else collections_block.get("nodes") or []
+                for cn in c_nodes:
+                    if cn and str(cn).strip():
+                        entitled_collections.append(str(cn).strip())
+
+            # BXGY trigger side: what the customer must buy (for upsell targeting).
+            trigger_products: list[str] = []
+            trigger_collections: list[str] = []
+            customer_buys = disc.get("customerBuys") or {}
+            buys_items = customer_buys.get("items") or {}
+            buys_products_block = buys_items.get("products") if isinstance(buys_items, dict) else None
+            if isinstance(buys_products_block, dict):
+                bp_nodes = buys_products_block.get("nodes") or []
+                for pn in bp_nodes:
+                    if pn and str(pn).strip():
+                        trigger_products.append(str(pn).strip())
+            buys_collections_block = buys_items.get("collections") if isinstance(buys_items, dict) else None
+            if isinstance(buys_collections_block, dict):
+                bc_nodes = buys_collections_block.get("nodes") or []
+                for cn in bc_nodes:
+                    if cn and str(cn).strip():
+                        trigger_collections.append(str(cn).strip())
+
+            for code in codes:
+                out.append(
+                    {
+                        "code": code,
+                        "title": title,
+                        "type": logical_type,
+                        "value": amount_value,
+                        "currency": currency,
+                        "entitled_product_ids": entitled_products,
+                        "entitled_collection_ids": entitled_collections,
+                        "trigger_product_ids": trigger_products,
+                        "trigger_collection_ids": trigger_collections,
+                    }
+                )
+        return out
+    except Exception:
+        return []
 
 def get_product_collections(product_id) -> List[str]:
     """
