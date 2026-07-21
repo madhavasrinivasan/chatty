@@ -1,6 +1,7 @@
 from tortoise import Tortoise
 from tortoise.connection import connections
 from app.core.config.config import settings
+from app.core.config.gemini_client import configure_gemini_env, get_genai_client
 from lightrag import LightRAG, QueryParam
 from lightrag.llm.gemini import gemini_model_complete , gemini_embed
 from lightrag.utils import setup_logger, wrap_embedding_func_with_attrs
@@ -29,9 +30,42 @@ async def init_db():
         modules={"models": ["app.core.models"]},
     )
 
+    await _upgrade_chat_sessions_cache()
+    await _upgrade_chatbot_customization_fields()
+
     if settings.env == "development":
         await Tortoise.generate_schemas(safe=True)
         await _upgrade_store_knowledge_vector_search()
+
+
+async def _upgrade_chat_sessions_cache():
+    """Add caching columns to chat_sessions table if they do not exist."""
+    try:
+        conn = connections.get("default")
+        await conn.execute_query("""
+            ALTER TABLE chat_sessions
+            ADD COLUMN IF NOT EXISTS prefetched_order_history TEXT NULL,
+            ADD COLUMN IF NOT EXISTS prefetched_user_facts TEXT NULL,
+            ADD COLUMN IF NOT EXISTS prefetched_previous_session_history TEXT NULL;
+        """)
+        print("✅ chat_sessions table upgraded with prefetched cache columns.")
+    except Exception as e:
+        print(f"⚠️ chat_sessions cache upgrade skipped or failed: {e}")
+
+
+async def _upgrade_chatbot_customization_fields():
+    """Add send_button_color and other_color to chatbot_customization table if they do not exist."""
+    try:
+        conn = connections.get("default")
+        await conn.execute_query("""
+            ALTER TABLE chatbot_customization
+            ADD COLUMN IF NOT EXISTS send_button_color VARCHAR(50) DEFAULT '#4F46E5',
+            ADD COLUMN IF NOT EXISTS other_color VARCHAR(50) DEFAULT '#6B7280';
+        """)
+        print("✅ chatbot_customization table upgraded with send_button_color and other_color columns.")
+    except Exception as e:
+        print(f"⚠️ chatbot_customization upgrade skipped or failed: {e}")
+
 
 
 async def _upgrade_store_knowledge_vector_search():
@@ -92,7 +126,8 @@ async def initialize_light_rag(store_id: str) -> LightRAG:
     work_dir = os.path.join(project_root, "rag", store_id)
     os.makedirs(work_dir, exist_ok=True)
 
-    _embed_client = genai.Client(api_key=settings.gemini_api_key)
+    configure_gemini_env()
+    _embed_client = get_genai_client()
 
     @wrap_embedding_func_with_attrs(
         embedding_dim=EMBED_DIM,
@@ -148,7 +183,7 @@ async def initialize_light_rag(store_id: str) -> LightRAG:
             prompt,
             system_prompt=system_prompt,
             history_messages=history_messages,
-            api_key=settings.gemini_api_key,
+            api_key=settings.gemini_api_key or None,
             model_name="gemini-2.0-flash",
             **kwargs
         )

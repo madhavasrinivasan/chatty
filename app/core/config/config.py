@@ -34,17 +34,19 @@ class Settings(BaseSettings):
     lightrag_graph_storage: str = Field(default="PGGraphStorage")
     lightrag_vector_storage: str = Field(default="PGVectorStorage")
 
-    # Google GenAI
-    gemini_api_key: str
-
-    gemini_project: str
-    gemini_location: str = Field(default="asia-south1")
+    # Google GenAI — API key OR Vertex AI via ~/.config/gcloud/application_default_credentials.json
+    gemini_api_key: str = Field(default="")
+    gemini_use_vertexai: bool = Field(default=False)
+    gemini_project: str = Field(default="")
+    gemini_location: str = Field(default="us-central1")
 
     # Shopify (for OAuth / token exchange)
     shopify_api_key: str = Field(default="")
     shopify_api_secret: str = Field(default="")
     shopify_api_version: str = Field(default="2024-01")
     shopify_callback_domain: str = Field(default="")  # e.g. https://your-app.com
+    comez_base_url: str = Field(default="http://localhost:3005")
+
 
     class Config:
         env_file = ".env"

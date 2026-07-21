@@ -1,8 +1,3 @@
-"""
-Response synthesis: LLM single-pass output (LLMSynthesisOutput), variant matching,
-and hydration to FinalFrontendResponse with optional Shopify inventory checks.
-Uses asyncio.gather for concurrent DB and REST calls; robust try/except in tasks.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -12,12 +7,14 @@ from typing import Any
 import httpx
 
 from app.core.config.config import settings
+from app.core.config.gemini_client import get_genai_client
 from app.core.schema.schema import (
     FinalFrontendResponse,
     FrontendProductCard,
     LLMSynthesisOutput,
 )
 from app.core.models.models import store_knowledge
+from app.core.services.token_tracker import estimate_tokens
 
 # Optional: GenAI client for LLM call (single pass)
 try:
@@ -27,7 +24,7 @@ try:
     def _get_genai_client() -> genai.Client:
         global _genai_client
         if _genai_client is None:
-            _genai_client = genai.Client(api_key=settings.gemini_api_key)
+            _genai_client = get_genai_client()
         return _genai_client
 except Exception:
     _get_genai_client = None  # type: ignore
@@ -101,14 +98,19 @@ async def check_shopify_inventory_rest(
     variant_id: str,
     shop_domain: str,
     access_token: str,
-) -> bool:
+) -> bool | None:
     """
     Async GET to Shopify Admin API to check variant inventory.
     GET /admin/api/2024-01/variants/{id}.json (or 2026-01 if configured).
-    Returns True if in stock, False otherwise. Robust to errors (returns False).
+
+    Fail-open semantics (we must never fabricate "sold out"):
+    - True  -> confirmed in stock (inventory_quantity > 0, or Shopify doesn't track qty).
+    - False -> confirmed out of stock (inventory_quantity <= 0).
+    - None  -> unknown/unverifiable (missing creds, non-200, timeout, or exception).
+    Callers should treat None as showable, since "can't verify" is not "sold out".
     """
     if not variant_id or not shop_domain or not access_token:
-        return False
+        return None
     host = shop_domain.replace("https://", "").replace("http://", "").split("/")[0]
     version = getattr(settings, "shopify_api_version", None) or "2024-01"
     url = f"https://{host}/admin/api/{version}/variants/{variant_id}.json"
@@ -123,7 +125,7 @@ async def check_shopify_inventory_rest(
                 timeout=10.0,
             )
         if resp.status_code != 200:
-            return False
+            return None
         data = resp.json()
         variant = data.get("variant") or data
         # Shopify variant can have inventory_quantity; if > 0 consider in stock
@@ -132,7 +134,7 @@ async def check_shopify_inventory_rest(
             return int(qty) > 0
         return True
     except Exception:
-        return False
+        return None
 
 
 def find_best_variant_match(
@@ -193,15 +195,18 @@ async def generate_final_response(
     order_history: str = "",
     previous_session_history: str = "",
     active_chat_history: list[dict[str, Any]] | None = None,
-) -> FinalFrontendResponse:
-    print(f"generate_final_response: {user_query}")
+    cart_items: list[dict[str, Any]] | None = None,
+) -> tuple[FinalFrontendResponse, dict[str, dict[str, int]]]:
     """
     Top-to-bottom flow:
     A) Single LLM call with full context (user_facts, order_history, previous_session_history, entire active chat).
     B) Build FinalFrontendResponse from LLM; if selected_products empty, return immediately.
     C) Concurrent get_variant_data_from_db + find_best_variant_match per product.
     D) Concurrent check_shopify_inventory_rest; only in-stock items go to products.
+
+    Returns (response, token_usage_chunk) where token_usage_chunk maps "final_response" -> input/output estimates.
     """
+    print(f"generate_final_response: {user_query}")
     # Step A: LLM call (single pass) with memory context and full active session
     context = ""
     if hybrid_results:
@@ -231,28 +236,49 @@ async def generate_final_response(
     active_block = _format_active_chat_for_synthesizer(active_chat_history)
     if active_block:
         memory_block += "ACTIVE SESSION (last 10 messages):\n" + active_block + "\n\n"
+    
+    if cart_items:
+        try:
+            cart_str = json.dumps([{"title": i.get("title"), "quantity": i.get("quantity"), "price": i.get("price")} for i in cart_items], indent=2)
+            memory_block += f"USER'S CURRENT CART (They have these items in their cart right now):\n{cart_str}\n\n"
+        except Exception:
+            pass
+
     instruction = (
-        "Use the full context (active session, past chats, facts, and orders) to act as a highly personalized sales rep. "
-        "Acknowledge past conversations if relevant, and suggest items based on past orders (e.g., sizing up).\n\n"
-        "If any product in the context has a non-empty `discount_info` list, you MUST mention that discount clearly in `general_answer` "
-        "(e.g. 'By the way, this item is 15% off right now with code X'). "
-        "When multiple products have discounts, highlight the one with the best discount.\n\n"
+        "You are a confident, high-performing sales associate for this store. Use the full context "
+        "(active session, past chats, facts, orders, and current cart) to sell like a knowledgeable human rep who is trusted with real store data.\n\n"
+        "TONE & BEHAVIOR RULES (follow all):\n"
+        "1. BE ASSUMPTIVE, NOT PERMISSION-SEEKING. Recommend directly and drive toward the sale. "
+        "Say 'Here's the X in your size — want me to add it to your cart?' NOT 'You might like…' or 'I can look into that.'\n"
+        "2. ALWAYS CITE EXACT NUMBERS. State exact price with currency and, when a product has a discount, the exact percentage or amount AND the exact code "
+        "(e.g. 'It's $48.00, and 15% off right now with code SAVE15'). NEVER use vague phrasing like 'some savings' or 'a discount'.\n"
+        "3. ALWAYS END WITH A NEXT STEP. Every general_answer must close with a specific action or question "
+        "(e.g. 'Want me to add the Black XL to your cart?' or 'Should I pull up the size guide?'). Never leave a dead end.\n"
+        "4. NEVER CLAIM YOU LACK ACCESS to data that is already provided above. If facts, past orders, the cart, or catalog results are in context, use them confidently. "
+        "Never say things like 'I don't have access to that' when the information is present.\n"
+        "5. NEVER MENTION STOCK OR AVAILABILITY. Do NOT say an item is in stock, low stock, or sold out, and do NOT add stock disclaimers. "
+        "Inventory is verified separately by the system, not by you.\n"
+        "6. PERSONALIZE. Acknowledge past conversations when relevant and suggest items based on past orders (e.g., sizing up, complementary items).\n"
+        "7. DISCOUNTS. If any product in the context has a non-empty `discount_info` list, you MUST surface it in general_answer with the exact number and code. "
+        "When multiple products have discounts, lead with the best one.\n\n"
     )
-    prompt = f"""You are an e-commerce assistant. {instruction}{memory_block}Current user question: "{user_query}".
+    prompt = f"""{instruction}{memory_block}Current user question: "{user_query}".
 
 Search results from our catalog (use these to answer and to pick products):
 {context}
 
 Output a JSON object with this exact shape. Use empty lists [] when not relevant.
-- general_answer: Markdown answer. Use safe phrasing when recommending products (e.g. "You might like…", "Here are some options…").
+- general_answer: Markdown answer written as an assumptive sales rep. Recommend directly, cite exact prices/discount %/codes, and end with a specific next action or question. Do NOT mention stock/availability or claim missing access.
 - urls: List of policy/sizing/collection URLs to show. Empty [] if none.
 - selected_products: List of {{ "product_id": "<id from results>", "requested_options": [] or e.g. ["Black","XL"] }}. Empty [] if not product-related.
-- suggested_actions: 2-3 short follow-up questions for the UI.
+- suggested_actions: 2-3 short, action-oriented follow-ups for the UI (e.g. "Add to cart", "See the size guide").
 - if there is product list and it related always addd to selected_products list , if not related then don't add to selected_products list. the max is 5 products.
 
 Output ONLY valid JSON, no markdown code block."""
 
+    input_tokens = estimate_tokens(prompt)
     llm_output: LLMSynthesisOutput
+    output_tokens = 0
     try:
         if _get_genai_client is None:
             raise RuntimeError("GenAI not available")
@@ -263,9 +289,11 @@ Output ONLY valid JSON, no markdown code block."""
             config={
                 "response_mime_type": "application/json",
                 "response_json_schema": LLMSynthesisOutput.model_json_schema(),
+                "thinking_config": {"thinking_budget": 0},
             },
         )
         raw = getattr(response, "text", None) or str(response)
+        output_tokens = estimate_tokens(raw or "")
         data = json.loads(raw)
         llm_output = LLMSynthesisOutput(
             general_answer=data.get("general_answer", ""),
@@ -281,6 +309,13 @@ Output ONLY valid JSON, no markdown code block."""
             suggested_actions=["What products do you have?", "Do you have a size guide?"],
         )
 
+    usage_chunk = {
+        "final_response": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
+    }
+
     final = FinalFrontendResponse(
         general_answer=llm_output.general_answer,
         urls=llm_output.urls,
@@ -289,7 +324,7 @@ Output ONLY valid JSON, no markdown code block."""
     )
     print(f"llm_output: {llm_output}")
     if not llm_output.selected_products:
-        return final
+        return final, usage_chunk
 
     # Step C: Concurrent DB fetch + variant match
     async def fetch_one(sel: Any) -> tuple[Any, dict | None, dict | None]:
@@ -330,12 +365,9 @@ Output ONLY valid JSON, no markdown code block."""
 
     print(f"resolved: {resolved}")
     if not resolved:
-        if llm_output.selected_products:
-            final.general_answer = (
-                final.general_answer
-                + "\n\n*Update: I just checked our live inventory and it looks like all of those specific items actually just sold out! Please check the product pages for other available options.*"
-            )
-        return final
+        # Hydration/lookup miss (DB id or variant match failed) — NOT a stock signal.
+        # Never fabricate "sold out" here; return the model's answer as-is.
+        return final, usage_chunk
 
     async def check_one(item: tuple) -> FrontendProductCard | None:
         pid, variant_id, title, price, currency, handle, image_url = item
@@ -344,8 +376,10 @@ Output ONLY valid JSON, no markdown code block."""
                 variant_id, shop_domain, access_token
             ) if (shop_domain and access_token) else True
         except Exception:
-            in_stock = False
-        if not in_stock:
+            in_stock = None
+        # Fail-open: only drop the card when inventory is CONFIRMED out of stock (False).
+        # True (in stock) and None (unverifiable) are both showable.
+        if in_stock is False:
             return None
         return FrontendProductCard(
             product_id=pid,
@@ -372,10 +406,11 @@ Output ONLY valid JSON, no markdown code block."""
             except Exception:
                 pass
 
-    # Silent rewrite: all selected were OOS or failed
+    # Reaching here with no cards means every resolved product was CONFIRMED out of stock
+    # (unverifiable items are kept via fail-open), so this note is honest, not fabricated.
     if llm_output.selected_products and not final.products:
         final.general_answer = (
             final.general_answer
-            + "\n\n*Update: I just checked our live inventory and it looks like all of those specific items actually just sold out! Please check the product pages for other available options.*"
+            + "\n\nThose specific options are currently unavailable — want me to find you the closest alternatives in stock?"
         )
-    return final
+    return final, usage_chunk

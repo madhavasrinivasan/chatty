@@ -19,7 +19,10 @@ from app.core.services.webcrawler import Services
 from app.core.config.config import settings
 from langchain_core.documents import Document as LangchainDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from app.core.services.ai_orchestrator import process_user_query as ai_process_user_query
+from app.core.services.ai_orchestrator import (
+    MODEL as ORCHESTRATOR_MODEL,
+    process_user_query as ai_process_user_query,
+)
 from app.core.services.database_executor import execute_search
 from app.core.services.response_synthesis import generate_final_response
 from app.core.services.shopify_service import (
@@ -28,7 +31,11 @@ from app.core.services.shopify_service import (
     decrypt_token,
     get_product_collections,
     transform_shopify_product,
+    build_store_token_usage_response,
+    format_order_support_message,
 )
+from app.core.services.token_tracker import merge_token_usage_payload
+from tortoise.expressions import F
 from app.core.services.shopify_return_service import ShopifyReturnService
 from jose import jwt as jose_jwt
 from jose.exceptions import JWTError
@@ -462,19 +469,88 @@ class  AppController:
         print(f"✅ Collections ingestion complete. Upserted {len(pending)} collection rows.")
 
     @staticmethod
+    async def ingest_comez_store_content(store_id: int, store_name: str):
+        """Best-effort page and policy sync for Comez from storefront endpoints."""
+        controller = AdminDbContoller()
+        endpoints = {
+            "terms": "/user/home/getterms",
+            "disclaimer": "/user/home/getdisclaimer",
+            "refund": "/user/home/getrefundpolicy",
+            "return": "/user/home/getreturnpolicy",
+            "shipping": "/user/home/getshipingpolicy",
+            "about": "/user/home/getactiveabout",
+        }
+        
+        headers = {
+            "storename": store_name,
+            "x-custom-domain": "false",
+        }
+
+        print("📖 Ingesting Comez Pages and Policies...")
+        for name, path in endpoints.items():
+            url = f"{settings.comez_base_url}{path}"
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(url, headers=headers, json={})
+                
+                if resp.status_code != 200:
+                    continue
+                
+                res_data = resp.json().get("data") or {}
+                content_text = ""
+                title = f"{name.capitalize()} Policy"
+                
+                if isinstance(res_data, list) and res_data:
+                    chunks = []
+                    for row in res_data:
+                        if isinstance(row, dict):
+                            chunks.append(row.get("content") or row.get("description") or row.get("name") or "")
+                    content_text = "\n\n".join([c for c in chunks if c])
+                elif isinstance(res_data, dict):
+                    content_text = res_data.get("content") or res_data.get("description") or res_data.get("name") or ""
+                    if res_data.get("title"):
+                        title = res_data["title"]
+                
+                if not content_text or len(content_text.strip()) < 10:
+                    continue
+                
+                soup = BeautifulSoup(content_text, "html.parser")
+                clean_text = soup.get_text(separator=" ").strip()
+                full_content = f"{title}: {clean_text}"
+                embedding = await Services.generate_embedding(full_content)
+                
+                handle = name.lower().replace(" ", "-")
+                shopify_product_id = f"comez_policy_{store_id}_{name}"
+                url_path = f"/policies/{handle}" if name != "about" else "/about"
+                
+                await controller.insert_store_knowledge_raw(
+                    store_id=store_id,
+                    shopify_product_id=shopify_product_id,
+                    handle=handle,
+                    title=title,
+                    content=full_content,
+                    data_type="page",
+                    url=url_path,
+                    embedding=embedding,
+                )
+                print(f"✅ Ingested Comez page: {title}")
+            except Exception as e:
+                print(f"⚠️ Error ingesting Comez page {name}: {e}")
+
+    @staticmethod
     async def get_products_background_task(chatbot_id: int, store_id: int , task_id: int | None = None):
         try:
             print(f"Getting products background task for chatbot: {chatbot_id}")
 
             shop_details = await AdminDbContoller().find_one_ecom_store(chatbot_id=chatbot_id)
             if not shop_details or shop_details is None:
-                raise ApplicationError.SomethingWentWrong("Cannot find shopify store")
+                raise ApplicationError.SomethingWentWrong("Cannot find ecom store")
 
             store_name = shop_details.store_name or ""
             access_token = shop_details.access_token or ""
-            if not store_name.strip() or not access_token:
+            if not store_name.strip():
                 raise ApplicationError.SomethingWentWrong(
-                    "Shopify store has no store name or access token; complete OAuth first."
+                    "Store has no store name; please configure it first."
                 )
 
             # Mark indexing as in-progress for the admin sync view.
@@ -486,6 +562,52 @@ class  AppController:
             except Exception:
                 # Non-fatal: indexing still proceeds even if sync flags fail.
                 pass
+
+            if shop_details.store_type == "comez":
+                from app.core.services.comez_service import ComezService
+                try:
+                    print(f"📖 Fetching products from Comez for: {store_name}")
+                    raw_products = await ComezService.fetch_all_products(store_name.strip())
+                    print(f"✅ Fetched {len(raw_products)} raw products from Comez.")
+                    
+                    products_list = []
+                    for item in raw_products:
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("status") == "inactive":
+                            continue
+                            
+                        clean_product = ComezService.transform_comez_product(item)
+                        products_list.append(clean_product)
+                        
+                        if len(products_list) >= 50:
+                            await Services.insert_products_to_database(products_list, chatbot_id=chatbot_id)
+                            products_list = []
+                            
+                    if products_list:
+                        await Services.insert_products_to_database(products_list, chatbot_id=chatbot_id)
+                    print("✅ Comez products inserted to database.")
+
+                    await AppController.ingest_comez_store_content(shop_details.id, store_name.strip())
+                    await Services.generate_store_dna_from_titles(shop_details.id)
+
+                    if task_id is not None:
+                        await AdminDbContoller().update_background_task_status(task_id, "completed", None)
+
+                    try:
+                        await ecom_store.filter(id=shop_details.id).update(sync_status="idle")
+                    except Exception:
+                        pass
+                    return
+                except Exception as e:
+                    print(f"error getting products background task for Comez: {e}")
+                    if task_id is not None:
+                        await AdminDbContoller().update_background_task_status(task_id, "failed", str(e))
+                    try:
+                        await ecom_store.filter(id=shop_details.id).update(sync_status="failed")
+                    except Exception:
+                        pass
+                    raise ApplicationError.SomethingWentWrong(str(e) or "Something went wrong")
 
             session = shopify.Session(store_name.strip(), "2024-04", access_token)
             shopify.ShopifyResource.activate_session(session)
@@ -643,7 +765,11 @@ class  AppController:
         Runs the AI orchestrator (IntentRouter + QueryExpander). Resolves store_dna from
         ecom_store when chatbot_id is provided. For HYBRID_SEARCH, runs execute_search
         and attaches search_results to the response.
-        """
+        """ 
+        import time as _time
+        _t0 = _time.perf_counter()
+
+        print(f"order history: {request.order_history} {request.previous_session_history} {request.user_facts}")
         store_dna = ""
         store_id = None
         store = None
@@ -733,6 +859,9 @@ class  AppController:
         except Exception:
             subscription_plan = "starter"
 
+        _t1 = _time.perf_counter()
+        print(f"  ⏱️ [CTRL] Store lookup + subscription: {_t1 - _t0:.2f}s")
+
         result = await ai_process_user_query(
             message=request.message,
             chat_history=chat_history,
@@ -744,10 +873,13 @@ class  AppController:
             user_facts=user_facts,
             order_history=order_history,
             previous_session_history=previous_session_history,
+            store_type=store.store_type if store else None,
         )
+        _t2 = _time.perf_counter()
+        print(f"  ⏱️ [CTRL] Unified Router+Expander (LLM #1): {_t2 - _t1:.2f}s  |  route={result.get('route')}")
         print(f"Result: {result}")
 
-        # ORDER_SUPPORT: return in final_response format (same as others) with order_status populated when present
+
         if result.get("route") == "ORDER_SUPPORT":
             order_status_payload = result.get("order_status")
             order_status_list = [order_status_payload] if order_status_payload is not None else []
@@ -756,7 +888,7 @@ class  AppController:
             elif order_status_list:
                 o = order_status_list[0] if isinstance(order_status_list[0], dict) else {}
                 if o.get("found"):
-                    general_answer = f"Here’s the status for order **{o.get('order_name', '')}**: {o.get('fulfillment_status', '')} (financial: {o.get('financial_status', '')})."
+                    general_answer = format_order_support_message(o)
                 else:
                     general_answer = o.get("message", "We couldn’t find that order. Please check the number and try again.")
             else:
@@ -870,7 +1002,10 @@ class  AppController:
             and store_id is not None
         ):
             try:
+                _t_db_start = _time.perf_counter()
                 rows = await execute_search(store_id=store_id, payload=result["search_payload"])
+                _t_db_end = _time.perf_counter()
+                print(f"  ⏱️ [CTRL] DB Search (execute_search): {_t_db_end - _t_db_start:.2f}s  |  {len(rows)} rows")
 
                 # Enrich hybrid search results with discount_info when discounts were requested.
                 discounts = result.get("discounts") or []
@@ -882,7 +1017,13 @@ class  AppController:
                     if not entitled_products:
                         # No explicit entitlements => treat as global (applies to all products)
                         return True
-                    return product_gid in entitled_products
+
+                    def _extract_id(gid: str) -> str:
+                        s = str(gid).strip()
+                        return s.split("/")[-1] if "/" in s else s
+
+                    pid = _extract_id(product_gid)
+                    return any(_extract_id(e) == pid for e in entitled_products)
 
                 for row in rows:
                     pid = str(row.get("shopify_product_id") or row.get("id") or "").strip()
@@ -909,7 +1050,8 @@ class  AppController:
                 result["search_results"] = rows
                 # LLM synthesis + variant match + inventory check -> FinalFrontendResponse
                 try:
-                    final = await generate_final_response(
+                    _t_synth_start = _time.perf_counter()
+                    final, synth_usage = await generate_final_response(
                         user_query=request.message or "",
                         hybrid_results=rows,
                         shop_domain=store.store_name if store else "",
@@ -919,16 +1061,36 @@ class  AppController:
                         user_facts=user_facts,
                         order_history=order_history,
                         previous_session_history=previous_session_history,
-                    active_chat_history=chat_history,
+                        active_chat_history=chat_history,
+                        cart_items=request.cart_items,
                     )
+                    _t_synth_end = _time.perf_counter()
+                    print(f"  ⏱️ [CTRL] Response Synthesis (LLM #2 + variant + inventory): {_t_synth_end - _t_synth_start:.2f}s")
+                    print(f"  ⏱️ [CTRL] HYBRID_SEARCH total: {_t_synth_end - _t2:.2f}s")
                     print(f"final: {final}")
                     result["final_response"] = final.model_dump()
+                    merged = merge_token_usage_payload(
+                        result.get("token_usage"),
+                        synth_usage,
+                        ORCHESTRATOR_MODEL,
+                    )
+                    if merged:
+                        result["token_usage"] = merged
                 except Exception as syn_err:
                     print(f"Response synthesis error: {syn_err}", flush=True)
                     result["final_response"] = None
             except Exception as e:
                 print(f"Orchestrator execute_search error: {e}", flush=True)
                 result["search_results"] = []
+
+        try:
+            await AppController._persist_orchestrator_token_usage(
+                store_id,
+                (request.session_id or "").strip() or None,
+                result.get("token_usage"),
+            )
+        except Exception as persist_err:
+            print(f"Token usage persist skipped: {persist_err}", flush=True)
 
         return APIResponse(
             success=True,
@@ -1107,6 +1269,95 @@ class  AppController:
             raise ApplicationError.SomethingWentWrong(error_message)
 
     # ============================
+    # Orchestrator LLM usage persistence (per store + per chat session)
+    # ============================
+
+    @staticmethod
+    async def _persist_orchestrator_token_usage(
+        store_id: int | None,
+        session_id: str | None,
+        token_usage: dict | None,
+    ) -> None:
+        if not token_usage or not token_usage.get("totals"):
+            return
+        totals = token_usage["totals"]
+        try:
+            tin = int(totals.get("input_tokens", 0))
+            tout = int(totals.get("output_tokens", 0))
+            cost = float(totals.get("total_cost_usd", 0.0))
+        except (TypeError, ValueError):
+            return
+        if tin == 0 and tout == 0:
+            return
+        if store_id:
+            await ecom_store.filter(id=store_id).update(
+                total_input_tokens=F("total_input_tokens") + tin,
+                total_output_tokens=F("total_output_tokens") + tout,
+                total_cost_usd=F("total_cost_usd") + cost,
+            )
+        if session_id:
+            from uuid import UUID as _UUID
+
+            try:
+                su = _UUID(session_id.strip())
+            except Exception:
+                return
+            await ChatSession.filter(id=su).update(
+                input_tokens_total=F("input_tokens_total") + tin,
+                output_tokens_total=F("output_tokens_total") + tout,
+                estimated_cost_usd_total=F("estimated_cost_usd_total") + cost,
+                tokens_used=F("tokens_used") + tin + tout,
+            )
+
+    @staticmethod
+    async def get_merchant_llm_usage(user: dict) -> APIResponse:
+        """Dashboard: cumulative estimated LLM usage for the merchant's primary store."""
+        store = await AdminDbContoller().find_first_ecom_store_by_user_id(user["id"])
+        if not store:
+            raise ApplicationError.NotFound("No store found")
+        tin = int(getattr(store, "total_input_tokens", 0) or 0)
+        tout = int(getattr(store, "total_output_tokens", 0) or 0)
+        tcost = float(getattr(store, "total_cost_usd", 0.0) or 0.0)
+        return APIResponse(
+            success=True,
+            message="LLM usage (tiktoken estimates; see token_usage.components per request for breakdown)",
+            data={
+                "store_id": store.id,
+                "total_input_tokens": tin,
+                "total_output_tokens": tout,
+                "total_cost_usd": round(tcost, 8),
+            },
+        )
+
+    # ============================
+    # Store token usage (tiktoken estimate over store_knowledge)
+    # ============================
+
+    @staticmethod
+    async def get_store_token_usage(user: dict) -> APIResponse:
+        """
+        Tiktoken estimate over all `store_knowledge` rows for the store tied to the chatbot API key.
+        """
+        store = None
+        if user.get("chatbot_id"):
+            store = await AdminDbContoller().find_one_ecom_store(user["chatbot_id"])
+        if store is None and user.get("id"):
+            store = await AdminDbContoller().find_first_ecom_store_by_user_id(user["id"])
+        if not store:
+            raise ApplicationError.NotFound("No store found")
+
+        rows = await AdminDbContoller().fetch_store_knowledge_rows_for_token_count(
+            ecom_store_id=store.id,
+            chatbot_id=store.chatbot_id,
+        )
+        data = build_store_token_usage_response(rows, store_id=store.id)
+        return APIResponse(
+            success=True,
+            message="Token usage estimate (tiktoken over store_knowledge)",
+            data=data,
+        )
+
+    # ============================
     # Admin Live Chat - business orchestration
     # ============================
 
@@ -1159,5 +1410,164 @@ class  AppController:
             success=True,
             message="Sync enqueued",
             data={"sync_status": "syncing", "last_synced_at": now.isoformat()},
+        )
+
+    @staticmethod
+    async def get_chatbot_customization(user: dict):
+        store = await AdminDbContoller().find_first_ecom_store_by_user_id(user["id"])
+        if not store:
+            raise ApplicationError.NotFound("No store found")
+        custom = await AdminDbContoller().get_chatbot_customization(store.id)
+        return APIResponse(
+            success=True,
+            message="Customization settings fetched",
+            data={
+                "bot_name": custom.bot_name,
+                "greeting_message": custom.greeting_message,
+                "logo_url": custom.logo_url,
+                "avatar_url": custom.avatar_url,
+                "primary_color": custom.primary_color,
+                "secondary_color": custom.secondary_color,
+                "background_color": custom.background_color,
+                "text_color": custom.text_color,
+                "user_bubble_color": custom.user_bubble_color,
+                "bot_bubble_color": custom.bot_bubble_color,
+                "font_family": custom.font_family,
+                "font_size_base": custom.font_size_base,
+                "widget_position": custom.widget_position,
+                "border_radius": custom.border_radius,
+                "button_icon_style": custom.button_icon_style,
+                "send_button_color": custom.send_button_color,
+                "other_color": custom.other_color,
+                "sample_questions": custom.sample_questions or [],
+                "system_prompt_override": custom.system_prompt_override,
+                "updated_at": custom.updated_at.isoformat() if custom.updated_at else None,
+            }
+        )
+
+    @staticmethod
+    async def update_chatbot_customization(user: dict, body: dict):
+        store = await AdminDbContoller().find_first_ecom_store_by_user_id(user["id"])
+        if not store:
+            raise ApplicationError.NotFound("No store found")
+        
+        update_data = {k: v for k, v in body.items() if v is not None}
+        custom = await AdminDbContoller().update_chatbot_customization(store.id, update_data)
+
+        # Sync customization to template_json in chatbot_settings table
+        custom_data = {
+            "bot_name": custom.bot_name,
+            "greeting_message": custom.greeting_message,
+            "logo_url": custom.logo_url,
+            "avatar_url": custom.avatar_url,
+            "primary_color": custom.primary_color,
+            "secondary_color": custom.secondary_color,
+            "background_color": custom.background_color,
+            "text_color": custom.text_color,
+            "user_bubble_color": custom.user_bubble_color,
+            "bot_bubble_color": custom.bot_bubble_color,
+            "font_family": custom.font_family,
+            "font_size_base": custom.font_size_base,
+            "widget_position": custom.widget_position,
+            "border_radius": custom.border_radius,
+            "button_icon_style": custom.button_icon_style,
+            "send_button_color": custom.send_button_color,
+            "other_color": custom.other_color,
+            "sample_questions": custom.sample_questions or [],
+            "system_prompt_override": custom.system_prompt_override,
+        }
+
+        if store.chatbot_id:
+            await chatbot_settings.filter(id=store.chatbot_id).update(template_json=custom_data)
+        else:
+            await chatbot_settings.filter(user_id=user["id"]).update(template_json=custom_data)
+
+        return APIResponse(
+            success=True,
+            message="Customization settings updated",
+            data={
+                "bot_name": custom.bot_name,
+                "greeting_message": custom.greeting_message,
+                "logo_url": custom.logo_url,
+                "avatar_url": custom.avatar_url,
+                "primary_color": custom.primary_color,
+                "secondary_color": custom.secondary_color,
+                "background_color": custom.background_color,
+                "text_color": custom.text_color,
+                "user_bubble_color": custom.user_bubble_color,
+                "bot_bubble_color": custom.bot_bubble_color,
+                "font_family": custom.font_family,
+                "font_size_base": custom.font_size_base,
+                "widget_position": custom.widget_position,
+                "border_radius": custom.border_radius,
+                "button_icon_style": custom.button_icon_style,
+                "send_button_color": custom.send_button_color,
+                "other_color": custom.other_color,
+                "sample_questions": custom.sample_questions or [],
+                "system_prompt_override": custom.system_prompt_override,
+                "updated_at": custom.updated_at.isoformat() if custom.updated_at else None,
+            }
+        )
+
+
+    @staticmethod
+    async def get_public_chatbot_customization(storefront_info: dict):
+        chatbot_id = storefront_info.get("chatbot_id")
+        store = await AdminDbContoller().find_one_ecom_store(chatbot_id)
+        if not store:
+            raise ApplicationError.NotFound("No store found for this chatbot_id")
+        custom = await AdminDbContoller().get_chatbot_customization(store.id)
+        return APIResponse(
+            success=True,
+            message="Public customization settings fetched",
+            data={
+                "bot_name": custom.bot_name,
+                "greeting_message": custom.greeting_message,
+                "logo_url": custom.logo_url,
+                "avatar_url": custom.avatar_url,
+                "primary_color": custom.primary_color,
+                "secondary_color": custom.secondary_color,
+                "background_color": custom.background_color,
+                "text_color": custom.text_color,
+                "user_bubble_color": custom.user_bubble_color,
+                "bot_bubble_color": custom.bot_bubble_color,
+                "font_family": custom.font_family,
+                "font_size_base": custom.font_size_base,
+                "widget_position": custom.widget_position,
+                "border_radius": custom.border_radius,
+                "button_icon_style": custom.button_icon_style,
+                "send_button_color": custom.send_button_color,
+                "other_color": custom.other_color,
+                "sample_questions": custom.sample_questions or [],
+                "system_prompt_override": custom.system_prompt_override,
+                "updated_at": custom.updated_at.isoformat() if custom.updated_at else None,
+            }
+        )
+
+
+    @staticmethod
+    async def get_sync_summary(user: dict):
+        summary = await AdminDbContoller().get_sync_summary_for_user(user["id"])
+        return APIResponse(
+            success=True,
+            message="Knowledge base sync summary fetched",
+            data=summary
+        )
+
+    @staticmethod
+    async def set_session_needs_human(user: dict, session_id: str, needs_human: bool):
+        from uuid import UUID as _UUID
+        try:
+            sid = _UUID(session_id)
+        except Exception:
+            raise ApplicationError.BadRequest("Invalid session_id")
+            
+        success = await AdminDbContoller().set_session_needs_human(sid, needs_human)
+        if not success:
+            raise ApplicationError.NotFound("Session not found")
+        return APIResponse(
+            success=True,
+            message=f"Session needs_human set to {needs_human}",
+            data={"session_id": session_id, "needs_human": needs_human}
         )
         

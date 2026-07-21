@@ -3,6 +3,7 @@ from app.admin.routes.authroutes import adminauthrouter
 from app.admin.routes.approutes import adminapprouter
 from app.admin.routes.sessionroutes import sessionrouter
 from app.core.schema.schemarespone import APIResponse
+from app.core.schema.schema import LiveSessionHandoverRequest
 from fastapi import APIRouter, BackgroundTasks, Depends
 
 
@@ -24,6 +25,15 @@ async def list_sessions(user: dict = Depends(AppController.validate_user)):
 @approuter.get("/sessions/{session_id}/messages", response_model=APIResponse)
 async def get_session_messages(session_id: str, user: dict = Depends(AppController.validate_user)):
     return await AppController.list_chat_session_messages(user, session_id)
+
+
+@approuter.post("/sessions/{session_id}/handover", response_model=APIResponse)
+async def set_session_handover(
+    session_id: str,
+    payload: LiveSessionHandoverRequest,
+    user: dict = Depends(AppController.validate_user)
+):
+    return await AppController.set_session_needs_human(user, session_id, payload.needs_human)
 
 
 @approuter.get("/sync-status", response_model=APIResponse)

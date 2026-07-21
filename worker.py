@@ -4,6 +4,7 @@ import os
 # Set environment variable before any imports (macOS fork() safety)
 os.environ["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "YES"
 
+from app.core.config.gemini_client import configure_gemini_env
 from app.core.config.db import init_db
 from app.core.models.dbontrollers.admindbcontroller import AdminDbContoller
 from app.admin.controller.appcontroller import AppController
@@ -131,7 +132,7 @@ async def _process_one_task(controller: AdminDbContoller, task):
 
 
 async def main():
-    """Initialize database and start polling for background tasks"""
+    configure_gemini_env()
     print("Initializing database...", flush=True)
     await init_db()
     print("Database initialized", flush=True)

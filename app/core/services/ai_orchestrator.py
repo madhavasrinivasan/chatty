@@ -9,8 +9,14 @@ from typing import Any
 from google import genai
 
 from app.core.config.config import settings
-from app.core.schema.schema import IntentRoute, SearchPayload, SearchPayloadFilters
+from app.core.config.gemini_client import get_genai_client
+from app.core.schema.schema import IntentRoute, SearchPayload, SearchPayloadFilters, UnifiedRouterOutput
 from app.core.services.shopify_service import get_order_status
+from app.core.services.token_tracker import (
+    build_token_usage_payload,
+    estimate_tokens,
+    merge_token_components,
+)
 
 _client: genai.Client | None = None
 
@@ -18,7 +24,7 @@ _client: genai.Client | None = None
 def _get_client() -> genai.Client:
     global _client
     if _client is None:
-        _client = genai.Client(api_key=settings.gemini_api_key)
+        _client = get_genai_client()
     return _client
 
 
@@ -88,10 +94,25 @@ class IntentRouter:
                 }
                 if route == "FOLLOW_UP_QUESTION":
                     out["follow_up_message"] = (data.get("follow_up_message") or "").strip() or None
+                out["_usage"] = {
+                    "intent_router": {
+                        "input_tokens": estimate_tokens(prompt),
+                        "output_tokens": estimate_tokens(raw),
+                    }
+                }
                 return out
         except Exception:
             pass
-        return {"route": "HYBRID_SEARCH", "extracted_order_number": None}
+        return {
+            "route": "HYBRID_SEARCH",
+            "extracted_order_number": None,
+            "_usage": {
+                "intent_router": {
+                    "input_tokens": estimate_tokens(prompt),
+                    "output_tokens": 0,
+                }
+            },
+        }
 
 
 class QueryExpander:
@@ -153,9 +174,22 @@ class QueryExpander:
                 else:
                     kw, vw = kw / total, vw / total
                 data["rrf_weights"] = {"keyword_weight": kw, "vector_weight": vw}
+            data["_usage"] = {
+                "query_expander": {
+                    "input_tokens": estimate_tokens(prompt),
+                    "output_tokens": estimate_tokens(raw),
+                }
+            }
             return data
         except Exception:
-            return _default_search_payload(current_message)
+            fb = _default_search_payload(current_message)
+            fb["_usage"] = {
+                "query_expander": {
+                    "input_tokens": estimate_tokens(prompt),
+                    "output_tokens": 0,
+                }
+            }
+            return fb
 
 
 def _build_expander_prompt(
@@ -240,6 +274,8 @@ def _build_router_prompt(
     if (order_history or "").strip():
         order_snippet = "User's past orders (for intent 'Where is my order?' / 'Reorder my last item'): " + (order_history or "").strip()[:1500] + "\n\n"
     discounts_snippet = ""
+    # NOTE: _build_router_prompt is kept for reference but is no longer used.
+    # The unified _build_unified_prompt below replaces both router + expander prompts.
     if (discounts_summary or "").strip():
         discounts_snippet = "DISCOUNTS (authoritative):\n" + (discounts_summary or "").strip() + "\n\n"
     return f"""You are an Intent Router for an AI Agent. The current store is on the {subscription_plan} plan.
@@ -281,42 +317,77 @@ def _get_return_specialist_response(
     current_message: str,
     chat_history: list,
     order_history: str,
-) -> str:
+) -> tuple[str, dict[str, dict[str, int]]]:
     """Generate Return Specialist reply using chat_history and order_history only (no vector search)."""
-    try:
-        client = _get_client()
-        order_block = f"PAST ORDERS:\n{order_history.strip()}\n\n" if (order_history or "").strip() else ""
-        history_lines = []
-        for m in (chat_history or [])[-10:]:
-            role = (m.get("role") if isinstance(m, dict) else None) or "user"
-            content = (m.get("content") if isinstance(m, dict) else None) or str(m)
-            if content:
-                history_lines.append(f"{role}: {content}")
-        history_block = "CHAT HISTORY:\n" + "\n".join(history_lines) + "\n\n" if history_lines else ""
-        prompt = f"""{RETURN_SPECIALIST_SYSTEM}
+    order_block = f"PAST ORDERS:\n{order_history.strip()}\n\n" if (order_history or "").strip() else ""
+    history_lines = []
+    for m in (chat_history or [])[-10:]:
+        role = (m.get("role") if isinstance(m, dict) else None) or "user"
+        content = (m.get("content") if isinstance(m, dict) else None) or str(m)
+        if content:
+            history_lines.append(f"{role}: {content}")
+    history_block = "CHAT HISTORY:\n" + "\n".join(history_lines) + "\n\n" if history_lines else ""
+    prompt = f"""{RETURN_SPECIALIST_SYSTEM}
 
 {order_block}{history_block}Current user message: {current_message}
 
 Reply as the Return Specialist. If the user has given their order number (and no item list has been shown yet), end your message with [ACTION:FETCH_ORDER | order: #<order_number>]. If they have already provided order number, item, and reason, end with [ACTION:CREATE_RETURN | ...] as specified."""
-        response = client.models.generate_content(model=MODEL, contents=prompt)
-        raw = getattr(response, "text", None) or str(response)
-        return (raw or "").strip() or "I can help with returns. Please share your order number, the item you want to return, and the reason."
-    except Exception as e:
-        print(f"_get_return_specialist_response error: {e}")
-        return "I can help with returns. Please share your order number, the item you want to return, and the reason."
-
-
-def _get_general_chat_response(current_message: str, chat_history: list) -> str:
-    """Generate a short conversational reply for GENERAL_CHAT (greetings, off-topic)."""
     try:
         client = _get_client()
-        prompt = f"""You are a friendly e-commerce store assistant. The user said: "{current_message}"
-Reply in one or two short sentences. Be helpful and conversational. Do not search for products or orders."""
-        response = client.models.generate_content(model=MODEL, contents=prompt)
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+            config={"thinking_config": {"thinking_budget": 0}},
+        )
         raw = getattr(response, "text", None) or str(response)
-        return (raw or "").strip() or "How can I help you today?"
+        text = (raw or "").strip() or "I can help with returns. Please share your order number, the item you want to return, and the reason."
+        usage = {
+            "return_specialist": {
+                "input_tokens": estimate_tokens(prompt),
+                "output_tokens": estimate_tokens(raw or ""),
+            }
+        }
+        return text, usage
+    except Exception as e:
+        print(f"_get_return_specialist_response error: {e}")
+        return (
+            "I can help with returns. Please share your order number, the item you want to return, and the reason.",
+            {
+                "return_specialist": {
+                    "input_tokens": estimate_tokens(prompt),
+                    "output_tokens": 0,
+                }
+            },
+        )
+
+
+def _get_general_chat_response(current_message: str, chat_history: list) -> tuple[str, dict[str, dict[str, int]]]:
+    """Generate a short conversational reply for GENERAL_CHAT (greetings, off-topic)."""
+    prompt = f"""You are a friendly, proactive e-commerce store assistant. The user said: "{current_message}"
+Reply in one or two short sentences: be warm and conversational, and do NOT search for products or orders here.
+ALWAYS end by offering a concrete next step so the conversation never dead-ends — e.g. "Want me to show today's bestsellers, or look up an order for you?"
+Never claim you can't help or lack access; steer them toward something you can do."""
+    try:
+        client = _get_client()
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+            config={"thinking_config": {"thinking_budget": 0}},
+        )
+        raw = getattr(response, "text", None) or str(response)
+        text = (raw or "").strip() or "How can I help you today?"
+        usage = {
+            "general_chat": {
+                "input_tokens": estimate_tokens(prompt),
+                "output_tokens": estimate_tokens(raw or ""),
+            }
+        }
+        return text, usage
     except Exception:
-        return "How can I help you today?"
+        return (
+            "How can I help you today?",
+            {"general_chat": {"input_tokens": estimate_tokens(prompt), "output_tokens": 0}},
+        )
 
 
 def _default_search_payload(current_message: str) -> dict[str, Any]:
@@ -333,6 +404,178 @@ def _default_search_payload(current_message: str) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Unified Router + Expander: single LLM call replaces two sequential calls
+# ---------------------------------------------------------------------------
+
+def _build_unified_prompt(
+    chat_history: list,
+    current_message: str,
+    subscription_plan: str,
+    store_dna: str = "",
+    user_facts: str = "",
+    order_history: str = "",
+    discounts_summary: str = "",
+) -> str:
+    """Build a single prompt that determines intent AND produces search payload when needed."""
+    # Chat history snippet (last 3 messages for pronoun resolution)
+    history_snippet = ""
+    if chat_history:
+        tail = chat_history[-3:] if len(chat_history) > 3 else chat_history
+        history_snippet = "Recent chat (last 3 messages): " + _format_chat_snippet(tail, 3) + "\n\n"
+
+    # Memory context
+    memory_block = ""
+    if (user_facts or "").strip() or (order_history or "").strip():
+        memory_block = "USER FACTS: " + (user_facts or "").strip() + " | PAST ORDERS: " + (order_history or "").strip()[:1500] + "\n\n"
+
+    discounts_block = ""
+    if (discounts_summary or "").strip():
+        discounts_block = "DISCOUNTS (authoritative):\n" + (discounts_summary or "").strip() + "\n\n"
+
+    return f"""You are an AI Agent for an e-commerce store. You must do TWO things in ONE response:
+1. Determine the correct ROUTE (intent classification)
+2. If the route is HYBRID_SEARCH, ALSO produce the search payload
+
+The store is on the "{subscription_plan}" plan.
+Store DNA: {store_dna or "A friendly online store."}
+
+{memory_block}{history_snippet}{discounts_block}ROUTING RULES (pick exactly one route):
+1. ORDER_SUPPORT: Use ONLY when the user has already provided an order number (e.g. #1001). Extract it in "extracted_order_number".
+2. GENERAL_CHAT: Simple greetings or small-talk ("hi", "hello", "thanks", "what can you do?").
+3. FOLLOW_UP_QUESTION: User's intent is ambiguous or critical info is missing. Includes: order intent but no order number, product intent but missing size/color/budget. Output a friendly "follow_up_message".
+4. RETURN_REQUEST: User mentions returning an item, getting a refund, or exchanging an order.
+5. HYBRID_SEARCH: Product searches, pricing, store policies, shipping, FAQs, "About Us". When you choose this, you MUST also fill in the search payload fields.
+6. GRAPH_SEARCH: Deep technical/manual questions. (Not available on starter/basic plans — use HYBRID_SEARCH instead.)
+7. PARALLEL_SEARCH: Both product + manual needed. (Not available on starter/basic plans — use HYBRID_SEARCH instead.)
+
+PLAN CONSTRAINTS:
+- If plan is "starter" or "basic": NEVER choose GRAPH_SEARCH or PARALLEL_SEARCH. Use HYBRID_SEARCH instead.
+
+SEARCH PAYLOAD RULES (only when route is HYBRID_SEARCH):
+- search_keywords: Core product terms. Preserve modifiers/adjectives. For multiple items use " OR ". For exclusions use "-" prefix.
+- semantic_context: Comma-separated abstract concepts/vibes (NEVER leave blank for HYBRID_SEARCH).
+- sort_column: "price" for cheapest/expensive, "rating" for best/top, "created_at" for newest. null otherwise.
+- sort_order: "ASC" or "DESC" matching sort intent. null if no sort.
+- limit: Default 20.
+- filters: {{ "color": string or null, "size": string or null }}
+- rrf_weights: EXACT/SPECIFIC queries → keyword_weight 0.8, vector_weight 0.2. VIBE/ABSTRACT → 0.2/0.8. BALANCED → 0.5/0.5.
+
+For non-HYBRID_SEARCH routes, leave ALL search fields as null.
+
+Output ONLY valid JSON. No markdown code blocks.
+
+Current user message: {current_message}"""
+
+
+class RouterAndExpander:
+    """Single LLM call that determines intent AND produces search payload."""
+
+    @staticmethod
+    def route_and_expand(
+        chat_history: list,
+        current_message: str,
+        subscription_plan: str,
+        store_dna: str = "",
+        user_facts: str = "",
+        order_history: str = "",
+        discounts_summary: str = "",
+    ) -> dict[str, Any]:
+        prompt = _build_unified_prompt(
+            chat_history,
+            current_message,
+            subscription_plan,
+            store_dna,
+            user_facts,
+            order_history,
+            discounts_summary,
+        )
+        try:
+            client = _get_client()
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "response_json_schema": UnifiedRouterOutput.model_json_schema(),
+                    "thinking_config": {"thinking_budget": 0},
+                },
+            )
+            raw = getattr(response, "text", None) or str(response)
+            data = json.loads(raw)
+            route = data.get("route") if isinstance(data.get("route"), str) else None
+            if route not in VALID_ROUTES:
+                route = "HYBRID_SEARCH"
+                data["route"] = route
+
+            # Build search_payload dict if HYBRID_SEARCH
+            search_payload = None
+            if route == "HYBRID_SEARCH":
+                filters_raw = data.get("filters") or {}
+                if not isinstance(filters_raw, dict):
+                    filters_raw = {"color": None, "size": None}
+                else:
+                    filters_raw.setdefault("color", None)
+                    filters_raw.setdefault("size", None)
+
+                rrf_raw = data.get("rrf_weights") or {}
+                if not isinstance(rrf_raw, dict):
+                    rrf_raw = {"keyword_weight": 0.5, "vector_weight": 0.5}
+                else:
+                    kw = float(rrf_raw.get("keyword_weight", 0.5))
+                    vw = float(rrf_raw.get("vector_weight", 0.5))
+                    total = kw + vw
+                    if total <= 0:
+                        kw, vw = 0.5, 0.5
+                    else:
+                        kw, vw = kw / total, vw / total
+                    rrf_raw = {"keyword_weight": kw, "vector_weight": vw}
+
+                search_payload = {
+                    "search_keywords": (data.get("search_keywords") or current_message.strip()[:200] or ""),
+                    "semantic_context": (data.get("semantic_context") or ""),
+                    "sort_column": data.get("sort_column"),
+                    "sort_order": data.get("sort_order"),
+                    "limit": int(data.get("limit") or 20),
+                    "filters": filters_raw,
+                    "rrf_weights": rrf_raw,
+                }
+
+            order_num = data.get("extracted_order_number")
+            if order_num is not None and not isinstance(order_num, str):
+                order_num = str(order_num) if order_num else None
+
+            result: dict[str, Any] = {
+                "route": route,
+                "extracted_order_number": order_num,
+                "wants_discounts": bool(data.get("wants_discounts")),
+                "search_payload": search_payload,
+            }
+            if route == "FOLLOW_UP_QUESTION":
+                result["follow_up_message"] = (data.get("follow_up_message") or "").strip() or None
+            result["_usage"] = {
+                "unified_router": {
+                    "input_tokens": estimate_tokens(prompt),
+                    "output_tokens": estimate_tokens(raw),
+                }
+            }
+            return result
+        except Exception as e:
+            print(f"RouterAndExpander error: {e}", flush=True)
+            return {
+                "route": "HYBRID_SEARCH",
+                "extracted_order_number": None,
+                "wants_discounts": False,
+                "search_payload": _default_search_payload(current_message),
+                "_usage": {
+                    "unified_router": {
+                        "input_tokens": estimate_tokens(prompt),
+                        "output_tokens": 0,
+                    }
+                },
+            }
+
+
 async def process_user_query(
     message: str,
     chat_history: list,
@@ -345,30 +588,42 @@ async def process_user_query(
     order_history: str = "",
     previous_session_history: str = "",
     discounts_summary: str = "",
+    store_type: str | None = None,
 ) -> dict[str, Any]:
     """
-    Step 1: Call IntentRouter (last 2 of chat_history, message, order_history) -> route + extracted_order_number.
-    Step 2:
-      - ORDER_SUPPORT: if no order_id return prompting; if order_id and store credentials, call Shopify order status and return order_status.
-      - GENERAL_CHAT: return a direct conversational response (Gemini).
-      - HYBRID_SEARCH: call QueryExpander (user_facts, order_history, last 2-3 of chat_history), return search_payload.
-      - GRAPH_SEARCH / PARALLEL_SEARCH: placeholder.
-    Caller may pass user_facts, order_history, previous_session_history for use in router/expander/synthesizer.
-    On router failure, falls back to HYBRID_SEARCH with default search payload.
+    Unified flow: single LLM call determines intent AND produces search payload.
+    Then branches by route for post-processing.
     """
-    # Step 1: Route (sync call in thread); inject order_history and last 2 messages
+    # Single unified LLM call (replaces separate IntentRouter + QueryExpander)
     try:
         route_result = await asyncio.to_thread(
-            IntentRouter.route,
+            RouterAndExpander.route_and_expand,
             chat_history or [],
             message or "",
             subscription_plan or "starter",
+            store_dna or "",
+            user_facts or "",
             order_history or "",
             discounts_summary or "",
         )
-        print(f"route_result: {route_result}")
+        print(f"unified_route_result: {route_result}")
     except Exception:
-        route_result = {"route": "HYBRID_SEARCH", "extracted_order_number": None}
+        route_result = {
+            "route": "HYBRID_SEARCH",
+            "extracted_order_number": None,
+            "wants_discounts": False,
+            "search_payload": _default_search_payload(message or ""),
+            "_usage": {
+                "unified_router": {
+                    "input_tokens": estimate_tokens(message or ""),
+                    "output_tokens": 0,
+                }
+            },
+        }
+
+    if not isinstance(route_result, dict):
+        route_result = {"route": "HYBRID_SEARCH", "extracted_order_number": None, "search_payload": _default_search_payload(message or "")}
+    router_usage = route_result.pop("_usage", {})
 
     route = route_result.get("route") if isinstance(route_result, dict) else None
     extracted_order_number = route_result.get("extracted_order_number") if isinstance(route_result, dict) else None
@@ -377,84 +632,107 @@ async def process_user_query(
     if route not in VALID_ROUTES:
         route = "HYBRID_SEARCH"
     elif plan_normalized in ("starter", "basic") and route in ("GRAPH_SEARCH", "PARALLEL_SEARCH"):
-        # Downgrade to HYBRID_SEARCH for non-enterprise plans
         route = "HYBRID_SEARCH"
 
-    # Step 2: Branch by route
+    def _with_usage(extra: dict[str, dict[str, int]] | None = None) -> dict[str, Any]:
+        comps = merge_token_components(router_usage, extra)
+        return build_token_usage_payload(comps, MODEL)
+
+    # Branch by route
     if route == "ORDER_SUPPORT":
         order_id = (extracted_order_number or "").strip()
         if not order_id:
-            return {"route": "ORDER_SUPPORT", "message": "need orderId", "prompting": True}
-        # Order ID present: call Shopify API for order status when store credentials are provided
+            return {
+                "route": "ORDER_SUPPORT",
+                "message": "need orderId",
+                "prompting": True,
+                "token_usage": _with_usage(),
+            }
         if store_name and access_token:
             try:
-                order_status = await asyncio.to_thread(
-                    get_order_status,
-                    store_name,
-                    access_token,
-                    order_id,
-                )
-                return {"route": "ORDER_SUPPORT", "extracted_order_number": order_id, "order_status": order_status}
+                if store_type == "comez":
+                    from app.core.services.comez_service import ComezService
+                    order_status = await ComezService.get_order_status(
+                        store_name,
+                        access_token,
+                        order_id,
+                    )
+                else:
+                    order_status = await asyncio.to_thread(
+                        get_order_status,
+                        store_name,
+                        access_token,
+                        order_id,
+                    )
+                return {
+                    "route": "ORDER_SUPPORT",
+                    "extracted_order_number": order_id,
+                    "order_status": order_status,
+                    "token_usage": _with_usage(),
+                }
             except Exception as e:
                 return {
                     "route": "ORDER_SUPPORT",
                     "extracted_order_number": order_id,
                     "order_status": {"found": False, "message": str(e)},
+                    "token_usage": _with_usage(),
                 }
-        return {"route": "ORDER_SUPPORT", "extracted_order_number": order_id}
+        return {"route": "ORDER_SUPPORT", "extracted_order_number": order_id, "token_usage": _with_usage()}
 
     if route == "GENERAL_CHAT":
-        reply = await asyncio.to_thread(
+        reply, gc_usage = await asyncio.to_thread(
             _get_general_chat_response,
             message or "",
             chat_history or [],
         )
-        return {"route": "GENERAL_CHAT", "conversational_response": reply}
+        return {
+            "route": "GENERAL_CHAT",
+            "conversational_response": reply,
+            "token_usage": _with_usage(gc_usage),
+        }
 
     if route == "FOLLOW_UP_QUESTION":
         follow_up = (route_result.get("follow_up_message") or "").strip() if isinstance(route_result, dict) else ""
         if not follow_up:
             follow_up = "Could you tell me a bit more so I can help you better?"
-        return {"route": "FOLLOW_UP_QUESTION", "follow_up_message": follow_up}
+        return {"route": "FOLLOW_UP_QUESTION", "follow_up_message": follow_up, "token_usage": _with_usage()}
 
     if route == "RETURN_REQUEST":
-        reply = await asyncio.to_thread(
+        reply, ret_usage = await asyncio.to_thread(
             _get_return_specialist_response,
             message or "",
             chat_history or [],
             order_history or "",
         )
-        return {"route": "RETURN_REQUEST", "return_specialist_response": reply}
+        return {
+            "route": "RETURN_REQUEST",
+            "return_specialist_response": reply,
+            "token_usage": _with_usage(ret_usage),
+        }
 
     wants_discounts = bool(route_result.get("wants_discounts")) if isinstance(route_result, dict) else False
 
-    discounts: list[dict[str, Any]] = []
-
     if route == "HYBRID_SEARCH":
-        chat_snippet = (chat_history or [])[-3:] if (chat_history or []) else []
-        try:
-            payload = await asyncio.to_thread(
-                QueryExpander.expand,
-                message or "",
-                store_dna or "",
-                user_facts or "",
-                order_history or "",
-                chat_snippet,
-                discounts_summary or "",
-            )
-        except Exception:
-            payload = _default_search_payload(message or "")
-        # If the router flagged discount intent and we have store credentials, fetch active discounts.
+        # Search payload already produced by the unified LLM call
+        payload = route_result.get("search_payload") or _default_search_payload(message or "")
+
+        discounts: list[dict[str, Any]] = []
         if wants_discounts and store_name and access_token:
             try:
-                from app.core.services.shopify_service import get_active_discounts  # local import to avoid cycles
-
+                from app.core.services.shopify_service import get_active_discounts
                 discounts = await get_active_discounts(store_name, access_token)
                 print(f"discounts: {discounts}")
             except Exception:
                 discounts = []
-        return {"route": "HYBRID_SEARCH", "search_payload": payload, "discounts": discounts, "wants_discounts": wants_discounts}
+
+        return {
+            "route": "HYBRID_SEARCH",
+            "search_payload": payload,
+            "discounts": discounts,
+            "wants_discounts": wants_discounts,
+            "token_usage": _with_usage(),
+        }
 
     # GRAPH_SEARCH or PARALLEL_SEARCH
     print("GRAPH/PARALLEL execution coming soon", flush=True)
-    return {"route": route}
+    return {"route": route, "token_usage": _with_usage()}

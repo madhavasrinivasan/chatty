@@ -102,6 +102,43 @@ class OrchestratorRequest(BaseModel):
     user_facts: Optional[str] = Field(default=None, description="Compiled permanent facts about the user (for router/expander/synthesizer).")
     order_history: Optional[str] = Field(default=None, description="Formatted past orders string (for router/expander/synthesizer).")
     previous_session_history: Optional[str] = Field(default=None, description="Summary of past chat sessions (for synthesizer).")
+    cart_token: Optional[str] = Field(default=None, description="Shopify cart token.")
+    cart_total: Optional[float] = Field(default=None, description="Shopify cart total price.")
+    cart_items: Optional[List[Any]] = Field(default_factory=list, description="Shopify cart items.")
+
+
+class LoadFirstConvoRequest(BaseModel):
+    """Widget open / session start — optional body; identity usually comes from headers."""
+    session_id: Optional[str] = Field(default=None, description="Existing session UUID if resuming.")
+    chat_history: Optional[List[Dict[str, Any]]] = Field(
+        default_factory=list,
+        description="Any messages already in the widget before the greeting (usually empty on first open).",
+    )
+    cart_token: Optional[str] = Field(default=None, description="Shopify cart token; header x-cart-token takes precedence.")
+    cart_items: Optional[List[Any]] = Field(default_factory=list, description="Shopify cart items.")
+
+
+class FirstConvoGreetingOutput(BaseModel):
+    """Strict JSON from the greeting LLM."""
+    general_answer: str = Field(
+        description="Warm, personal opening message in Markdown (2-4 short sentences). Reference past orders or chats only when context supports it."
+    )
+    suggested_actions: List[str] = Field(
+        default_factory=list,
+        description="2-3 short tap-to-send follow-up prompts for the chat UI.",
+    )
+
+
+class LoadFirstConvoResponse(BaseModel):
+    """Returned to the storefront widget when the chat opens."""
+    session_id: str
+    personalized: bool = Field(description="True when customer email was present and memory/orders were used.")
+    general_answer: str = Field(description="Opening greeting (Markdown).")
+    suggested_actions: List[str] = Field(default_factory=list)
+    context_used: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Flags for debugging: has_orders, has_user_facts, has_previous_sessions, has_cart_token.",
+    )
 
 
 class AddshopifyRequest(BaseModel):
@@ -174,6 +211,55 @@ class SearchPayload(BaseModel):
     )
 
 
+class UnifiedRouterOutput(BaseModel):
+    """Combined IntentRouter + QueryExpander output for a single LLM call."""
+    # --- Routing fields ---
+    route: Literal["ORDER_SUPPORT", "GENERAL_CHAT", "FOLLOW_UP_QUESTION", "RETURN_REQUEST", "HYBRID_SEARCH", "GRAPH_SEARCH", "PARALLEL_SEARCH"] = Field(
+        description="ORDER_SUPPORT: order/tracking/shipping. GENERAL_CHAT: greetings, off-topic. FOLLOW_UP_QUESTION: need clarification. RETURN_REQUEST: return item, refund, or exchange. HYBRID_SEARCH: product search, pricing, policies. GRAPH_SEARCH: manual/PDF. PARALLEL_SEARCH: both product and manual."
+    )
+    extracted_order_number: Optional[str] = Field(
+        default=None,
+        description="Order number if present (e.g. #1001), otherwise null.",
+    )
+    follow_up_message: Optional[str] = Field(
+        default=None,
+        description="When route is FOLLOW_UP_QUESTION, the clarifying question to ask the user.",
+    )
+    wants_discounts: Optional[bool] = Field(
+        default=False,
+        description="True when the user is explicitly asking about discounts/coupons/offers.",
+    )
+    # --- Search payload fields (only filled when route is HYBRID_SEARCH) ---
+    search_keywords: Optional[str] = Field(
+        default=None,
+        description="Core product search terms. Only fill when route is HYBRID_SEARCH.",
+    )
+    semantic_context: Optional[str] = Field(
+        default=None,
+        description="Semantic/vibe context for vector search. Only fill when route is HYBRID_SEARCH.",
+    )
+    sort_column: Optional[Literal["price", "rating", "created_at"]] = Field(
+        default=None,
+        description="Column to sort by, or null.",
+    )
+    sort_order: Optional[Literal["ASC", "DESC"]] = Field(
+        default=None,
+        description="Sort direction, or null.",
+    )
+    limit: Optional[int] = Field(
+        default=20,
+        description="How many items to return. Default 20.",
+    )
+    filters: Optional[SearchPayloadFilters] = Field(
+        default=None,
+        description="Extracted color/size filters. Only fill when route is HYBRID_SEARCH.",
+    )
+    rrf_weights: Optional[RRFWeights] = Field(
+        default=None,
+        description="RRF weights (must sum to 1.0). Only fill when route is HYBRID_SEARCH.",
+    )
+
+
 # --- LLM synthesis & frontend response (strict data contracts) ---
 
 
@@ -191,7 +277,7 @@ class IntentToCart(BaseModel):
 class LLMSynthesisOutput(BaseModel):
     """Schema forced on the LLM. Leave lists empty [] when not relevant to the user's query."""
     general_answer: str = Field(
-        description="Answer in Markdown. Use safe phrasing when recommending products."
+        description="Answer in Markdown, written as an assumptive sales rep: recommend directly, cite exact prices/discount %/codes, and end with a specific next action or question. Do not mention stock/availability or claim missing access to data provided in context."
     )
     urls: List[str] = Field(
         default_factory=list,
@@ -255,3 +341,60 @@ class FinalFrontendResponse(BaseModel):
         default=None,
         description="When return_ui_items is set, the order number (e.g. #1002) for use in action_payload.order_number on submit.",
     )
+
+
+# --- Merchant Admin Customization, Handover, and Summary schemas ---
+
+class ChatbotCustomizationResponse(BaseModel):
+    bot_name: str
+    greeting_message: str
+    logo_url: Optional[str] = None
+    avatar_url: Optional[str] = None
+    primary_color: str
+    secondary_color: str
+    background_color: str
+    text_color: str
+    user_bubble_color: str
+    bot_bubble_color: str
+    font_family: str
+    font_size_base: int
+    widget_position: str
+    border_radius: int
+    button_icon_style: str
+    send_button_color: str
+    other_color: str
+    sample_questions: List[str]
+    system_prompt_override: Optional[str] = None
+    updated_at: Optional[str] = None
+
+class ChatbotCustomizationUpdate(BaseModel):
+    bot_name: Optional[str] = None
+    greeting_message: Optional[str] = None
+    logo_url: Optional[str] = None
+    avatar_url: Optional[str] = None
+    primary_color: Optional[str] = None
+    secondary_color: Optional[str] = None
+    background_color: Optional[str] = None
+    text_color: Optional[str] = None
+    user_bubble_color: Optional[str] = None
+    bot_bubble_color: Optional[str] = None
+    font_family: Optional[str] = None
+    font_size_base: Optional[int] = None
+    widget_position: Optional[str] = None
+    border_radius: Optional[int] = None
+    button_icon_style: Optional[str] = None
+    send_button_color: Optional[str] = None
+    other_color: Optional[str] = None
+    sample_questions: Optional[List[str]] = None
+    system_prompt_override: Optional[str] = None
+
+
+class KnowledgeSummary(BaseModel):
+    total_products: int
+    total_pages: int
+    total_policies: int
+    last_synced_at: Optional[str] = None
+    sync_status: str
+
+class LiveSessionHandoverRequest(BaseModel):
+    needs_human: bool

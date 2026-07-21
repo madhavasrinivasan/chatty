@@ -1,5 +1,8 @@
+from app.core.config.gemini_client import configure_gemini_env
 from app.core.services.webcrawler import Services 
 from fastapi import FastAPI,APIRouter, UploadFile, File, Form, Depends, Request
+from fastapi.staticfiles import StaticFiles
+import os
 from app.core.config.db import init_db, close_db ,initialize_light_rag
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn as uvicorn
@@ -12,7 +15,7 @@ from app.admin.controller.appcontroller import AppController
 import httpx
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # DB init (your existing logic)
+    configure_gemini_env()
     await init_db()
 
     # RAG instances per store (lazy-loaded). Key: store_id, value: LightRAG instance.
@@ -43,6 +46,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount Assets directory to serve uploaded media
+os.makedirs("Assets", exist_ok=True)
+app.mount("/assets", StaticFiles(directory="Assets"), name="assets")
 
 app.include_router(approuter)
 # app.include_router(sessionrouter) 

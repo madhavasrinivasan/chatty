@@ -62,3 +62,71 @@ class FileHandler:
         except Exception as e:
             print(f"error uploading file: {e}")
             raise ApplicationError.SomethingWentWrong("Error uploading file")
+
+    async def upload_image(self, file: UploadFile) -> str:
+        return await self.upload_and_compress_image(file)
+
+    async def upload_and_compress_image(self, file: UploadFile) -> str:
+        try:
+            upload_dir = os.path.join("Assets", "Images")
+            os.makedirs(upload_dir, exist_ok=True)
+            
+            if not file or not file.filename:
+                raise ApplicationError.BadRequest("No file uploaded")
+                
+            ext = os.path.splitext(file.filename)[1].lower()
+            valid_exts = [".png", ".jpg", ".jpeg", ".svg", ".webp"]
+            if ext not in valid_exts:
+                raise ApplicationError.BadRequest(f"Invalid file type. Only PNG, SVG, JPEG, and WebP are allowed. File: {file.filename}")
+            
+            max_size = 1 * 1024 * 1024  # 1MB limit
+            
+            # Read all file bytes
+            file_bytes = await file.read()
+            size = len(file_bytes)
+                
+            if size > max_size:
+                raise ApplicationError.BadRequest(f"Image size exceeds maximum allowed size (1MB). File: {file.filename}")
+            
+            file_name = f"{int(time.time())}_{file.filename}"
+            file_path = os.path.join(upload_dir, file_name)
+            
+            # Compress image if not SVG
+            if ext != ".svg":
+                try:
+                    import io
+                    from PIL import Image
+                    img = Image.open(io.BytesIO(file_bytes))
+                    format_to_save = img.format or "JPEG"
+                    
+                    if img.mode in ("RGBA", "LA") and format_to_save in ("JPEG", "JPG"):
+                        background = Image.new("RGBA", img.size, (255, 255, 255))
+                        alpha_composite = Image.alpha_composite(background, img)
+                        img = alpha_composite.convert("RGB")
+                    
+                    out_io = io.BytesIO()
+                    if format_to_save in ("JPEG", "JPG"):
+                        img.save(out_io, format="JPEG", quality=75, optimize=True)
+                    elif format_to_save == "PNG":
+                        img.save(out_io, format="PNG", optimize=True)
+                    elif format_to_save == "WEBP":
+                        img.save(out_io, format="WEBP", quality=75, method=6)
+                    else:
+                        img.save(out_io, format="WEBP", quality=75)
+                    
+                    compressed_bytes = out_io.getvalue()
+                    if len(compressed_bytes) < len(file_bytes):
+                        file_bytes = compressed_bytes
+                except Exception as comp_err:
+                    print(f"Error compressing image: {comp_err}")
+            
+            # Write bytes to disk
+            async with aiofiles.open(file_path, "wb") as out_file:
+                await out_file.write(file_bytes)
+                
+            return f"/assets/Images/{file_name}"
+        except Exception as e:
+            if isinstance(e, ApplicationError):
+                raise e
+            print(f"error uploading image: {e}")
+            raise ApplicationError.SomethingWentWrong("Error uploading image")

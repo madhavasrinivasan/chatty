@@ -17,6 +17,7 @@ class subscription_pack(str, Enum):
 
 class ecom_store_type(str, Enum):
     shopify = "shopify"
+    comez = "comez"
     custom = "custom"
 
 class subscription_type(str, Enum):
@@ -54,6 +55,7 @@ class store_knowledge_data_type(str, Enum):
 
 class product_type(str, Enum):
     shopify = "shopify"
+    comez = "comez"
     custom = "custom"
 
 
@@ -268,8 +270,8 @@ class ecom_store(models.Model):
     chatbot_id = fields.IntField(null=True)
     store_id = fields.CharField(max_length=255, null=True)
     store_name = fields.CharField(max_length=255)
-    access_token = fields.CharField(max_length=255 , null=True)
-    refresh_token = fields.CharField(max_length=255 , null=True)
+    access_token = fields.CharField(max_length=2048 , null=True)
+    refresh_token = fields.CharField(max_length=2048 , null=True)
     expires_at = fields.DatetimeField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True, null=True)
     updated_at = fields.DatetimeField(auto_now=True, null=True)
@@ -277,12 +279,48 @@ class ecom_store(models.Model):
     store_dna = fields.TextField(null=True)
     last_synced_at = fields.DatetimeField(null=True)
     sync_status = fields.CharField(max_length=20, default="idle")
+    # Cumulative LLM usage estimates (tiktoken + pricing from token_tracker), updated per orchestrator turn.
+    total_input_tokens = fields.BigIntField(default=0)
+    total_output_tokens = fields.BigIntField(default=0)
+    total_cost_usd = fields.FloatField(default=0.0)
     class Meta:
         table = "ecom_store"
         indexes = [
             ("store_id",),
             ("user_id",),
             ("chatbot_id",),
+        ]
+
+
+class chatbot_customization(models.Model):
+    id = fields.IntField(pk=True)
+    store = fields.OneToOneField("models.ecom_store", related_name="customization", on_delete=fields.CASCADE)
+    bot_name = fields.CharField(max_length=255, default="Assistant")
+    greeting_message = fields.TextField(default="Hi! How can I help you today?")
+    logo_url = fields.TextField(null=True)
+    avatar_url = fields.TextField(null=True)
+    primary_color = fields.CharField(max_length=50, default="#4F46E5")
+    secondary_color = fields.CharField(max_length=50, default="#E0E7FF")
+    background_color = fields.CharField(max_length=50, default="#FFFFFF")
+    text_color = fields.CharField(max_length=50, default="#1F2937")
+    user_bubble_color = fields.CharField(max_length=50, default="#4F46E5")
+    bot_bubble_color = fields.CharField(max_length=50, default="#F3F4F6")
+    font_family = fields.CharField(max_length=100, default="Inter")
+    font_size_base = fields.IntField(default=14)
+    widget_position = fields.CharField(max_length=50, default="bottom-right")
+    border_radius = fields.IntField(default=8)
+    button_icon_style = fields.CharField(max_length=50, default="default")
+    send_button_color = fields.CharField(max_length=50, default="#4F46E5")
+    other_color = fields.CharField(max_length=50, default="#6B7280")
+    sample_questions = fields.JSONField(default=list)
+    system_prompt_override = fields.TextField(null=True)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+
+    class Meta:
+        table = "chatbot_customization"
+        indexes = [
+            ("store_id",),
         ]
 
 
@@ -314,7 +352,17 @@ class ChatSession(models.Model):
     shop_domain = fields.CharField(max_length=255, index=True)
     customer_email = fields.CharField(max_length=255, null=True)
     cart_token = fields.CharField(max_length=255, null=True)
+    # Cumulative tiktoken estimate (legacy: input+output per turn).
+    tokens_used = fields.BigIntField(default=0)
+    # Per-session LLM estimates (orchestrator: intent + expander + final response).
+    input_tokens_total = fields.BigIntField(default=0)
+    output_tokens_total = fields.BigIntField(default=0)
+    estimated_cost_usd_total = fields.FloatField(default=0.0)
     status = fields.CharField(max_length=20, default="active")
+    needs_human = fields.BooleanField(default=False)
+    prefetched_order_history = fields.TextField(null=True)
+    prefetched_user_facts = fields.TextField(null=True)
+    prefetched_previous_session_history = fields.TextField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
 
@@ -335,7 +383,10 @@ class ChatMessage(models.Model):
     id = fields.UUIDField(pk=True, default=uuid.uuid4)
     session = fields.ForeignKeyField("models.ChatSession", related_name="messages", on_delete=fields.CASCADE)
     role = fields.CharField(max_length=20)  # "user" or "assistant"
-    content = fields.TextField()
+    # Plain text (user message, or optional short copy for assistant e.g. general_answer).
+    content = fields.TextField(null=True)
+    # Full structured payload: for assistant, entire FinalFrontendResponse / final_response JSON.
+    payload = fields.JSONField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
 
     class Meta:
@@ -359,4 +410,27 @@ class UserMemorySummary(models.Model):
         indexes = [
             ("user_email",),
             ("store_id",),
+        ]
+
+class TicketsRaised(models.Model):
+    id = fields.IntField(pk=True)
+    user_id = fields.IntField()
+    chatbot_id = fields.IntField()
+    ticket_id = fields.CharField(max_length=255)
+    ticket_subject = fields.CharField(max_length=255)
+    user_email = fields.CharField(max_length=255)
+    user_name = fields.CharField(max_length=255)
+    user_phone = fields.CharField(max_length=255)
+    user_address = fields.TextField()
+    ticket_description = fields.TextField()
+    ticket_status = fields.CharField(max_length=255)
+    ticket_created_at = fields.DatetimeField(auto_now_add=True)
+    ticket_updated_at = fields.DatetimeField(auto_now=True)
+    class Meta:
+        table = "tickets_raised"
+        indexes = [
+            ("user_id",),
+            ("chatbot_id",),
+            ("ticket_id",),
+            ("ticket_status", "ticket_created_at", "ticket_updated_at"),
         ]

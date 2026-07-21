@@ -433,6 +433,25 @@ class AdminDbContoller:
             raise ApplicationError.InternalServerError("Cannot insert store_knowledge")
 
     # ============================
+    # store_knowledge: raw rows for metrics (no HTTP / billing shape here)
+    # ============================
+
+    async def fetch_store_knowledge_rows_for_token_count(
+        self, *, ecom_store_id: int, chatbot_id: int | None
+    ) -> list[dict]:
+        """
+        Plain `store_knowledge` rows for token estimation.
+        `store_id` may be ecom_store.id (pages/collections) or chatbot_id (product ingest).
+        """
+        ids: set[int] = {int(ecom_store_id)}
+        if chatbot_id is not None:
+            ids.add(int(chatbot_id))
+        rows = await self.models.store_knowledge.filter(store_id__in=list(ids)).values(
+            "id", "title", "content", "data_type"
+        )
+        return list(rows)
+
+    # ============================
     # Live chat: sessions/messages
     # ============================
 
@@ -462,8 +481,13 @@ class AdminDbContoller:
         for s in sessions:
             last_msg = await self.models.ChatMessage.filter(session_id=s.id).order_by("-created_at").first()
             snippet = ""
-            if last_msg and getattr(last_msg, "content", None):
-                snippet = str(last_msg.content)[:80]
+            if last_msg:
+                if getattr(last_msg, "content", None):
+                    snippet = str(last_msg.content)[:80]
+                elif isinstance(getattr(last_msg, "payload", None), dict):
+                    ga = (last_msg.payload or {}).get("general_answer")
+                    if ga:
+                        snippet = str(ga)[:80]
 
             out.append(
                 {
@@ -471,7 +495,12 @@ class AdminDbContoller:
                     "shop_domain": s.shop_domain,
                     "customer_email": s.customer_email,
                     "cart_token": s.cart_token,
+                    "tokens_used": getattr(s, "tokens_used", None),
+                    "input_tokens_total": getattr(s, "input_tokens_total", None),
+                    "output_tokens_total": getattr(s, "output_tokens_total", None),
+                    "estimated_cost_usd_total": getattr(s, "estimated_cost_usd_total", None),
                     "status": s.status,
+                    "needs_human": getattr(s, "needs_human", False),
                     "created_at": s.created_at.isoformat() if s.created_at else None,
                     "updated_at": s.updated_at.isoformat() if s.updated_at else None,
                     "latest_message_snippet": snippet,
@@ -501,6 +530,7 @@ class AdminDbContoller:
                 "id": str(m.id),
                 "role": m.role,
                 "content": m.content,
+                "payload": getattr(m, "payload", None),
                 "created_at": m.created_at.isoformat() if m.created_at else None,
             }
             for m in messages
@@ -525,3 +555,106 @@ class AdminDbContoller:
             last_synced_at=last_synced_at,
             sync_status=sync_status,
         )
+
+    # ============================
+    # Chatbot Customization DB Methods
+    # ============================
+
+    async def get_chatbot_customization(self, store_id: int):
+        try:
+            custom = await self.models.chatbot_customization.filter(store_id=store_id).first()
+            if not custom:
+                # Create with default options
+                custom = await self.models.chatbot_customization.create(
+                    store_id=store_id,
+                    bot_name="Assistant",
+                    greeting_message="Hi! How can I help you today?",
+                    primary_color="#4F46E5",
+                    secondary_color="#E0E7FF",
+                    background_color="#FFFFFF",
+                    text_color="#1F2937",
+                    user_bubble_color="#4F46E5",
+                    bot_bubble_color="#F3F4F6",
+                    font_family="Inter",
+                    font_size_base=14,
+                    widget_position="bottom-right",
+                    border_radius=8,
+                    button_icon_style="default",
+                    send_button_color="#4F46E5",
+                    other_color="#6B7280",
+                    sample_questions=["What are your best sellers?", "Do you have any active discounts?"],
+                )
+            return custom
+        except Exception as e:
+            print(f"Error getting chatbot customization for store {store_id}: {e}")
+            raise ApplicationError.InternalServerError("Cannot get chatbot customization")
+
+    async def update_chatbot_customization(self, store_id: int, data: dict):
+        try:
+            # Ensure it exists
+            await self.get_chatbot_customization(store_id)
+            await self.models.chatbot_customization.filter(store_id=store_id).update(**data)
+            return await self.models.chatbot_customization.filter(store_id=store_id).first()
+        except Exception as e:
+            print(f"Error updating chatbot customization for store {store_id}: {e}")
+            raise ApplicationError.InternalServerError("Cannot update chatbot customization")
+
+    # ============================
+    # Sync Summary & handoff flag methods
+    # ============================
+
+    async def get_sync_summary_for_user(self, user_id: int) -> dict:
+        try:
+            store = await self.find_first_ecom_store_by_user_id(user_id)
+            if not store:
+                return {
+                    "total_products": 0,
+                    "total_pages": 0,
+                    "total_policies": 0,
+                    "last_synced_at": None,
+                    "sync_status": "idle",
+                }
+            
+            store_ids = [store.id]
+            if store.chatbot_id:
+                store_ids.append(store.chatbot_id)
+                
+            total_products = await self.models.store_knowledge.filter(
+                store_id__in=store_ids, data_type="product"
+            ).count()
+            
+            total_pages = await self.models.store_knowledge.filter(
+                store_id__in=store_ids, data_type="page"
+            ).count()
+            
+            total_policies_policy = await self.models.store_knowledge.filter(
+                store_id__in=store_ids, data_type="policy"
+            ).count()
+            
+            total_policies_page = await self.models.store_knowledge.filter(
+                store_id__in=store_ids, data_type="page", url__icontains="/policies/"
+            ).count()
+            
+            total_policies = total_policies_policy + total_policies_page
+
+            return {
+                "total_products": total_products,
+                "total_pages": total_pages,
+                "total_policies": total_policies,
+                "last_synced_at": store.last_synced_at.isoformat() if store.last_synced_at else None,
+                "sync_status": store.sync_status,
+            }
+        except Exception as e:
+            print(f"Error getting sync summary: {e}")
+            raise ApplicationError.InternalServerError("Cannot get sync summary")
+
+    async def set_session_needs_human(self, session_id: uuid.UUID, needs_human: bool) -> bool:
+        try:
+            session = await self.models.ChatSession.filter(id=session_id).first()
+            if not session:
+                return False
+            await self.models.ChatSession.filter(id=session_id).update(needs_human=needs_human)
+            return True
+        except Exception as e:
+            print(f"Error setting needs_human to {needs_human} on session {session_id}: {e}")
+            raise ApplicationError.InternalServerError("Cannot update session handover status")

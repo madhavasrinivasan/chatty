@@ -8,6 +8,7 @@ import json
 from typing import Any
 
 from app.core.config.config import settings
+from app.core.config.gemini_client import get_genai_client
 from app.core.models.models import ChatTranscript, UserMemorySummary
 from app.core.schema.schema import SyncSessionRequest
 from app.core.services.shopify_service import get_orders_by_customer_email
@@ -19,7 +20,7 @@ try:
     def _get_genai_client() -> genai.Client:
         global _genai_client
         if _genai_client is None:
-            _genai_client = genai.Client(api_key=settings.gemini_api_key)
+            _genai_client = get_genai_client()
         return _genai_client
 except Exception:
     _get_genai_client = None  # type: ignore

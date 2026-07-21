@@ -1,0 +1,11 @@
+-- Run against your Postgres DB (adjust schema if needed).
+
+ALTER TABLE ecom_store
+  ADD COLUMN IF NOT EXISTS total_input_tokens BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS total_output_tokens BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS total_cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0;
+
+ALTER TABLE chat_sessions
+  ADD COLUMN IF NOT EXISTS input_tokens_total BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS output_tokens_total BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS estimated_cost_usd_total DOUBLE PRECISION NOT NULL DEFAULT 0;

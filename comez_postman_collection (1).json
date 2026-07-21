@@ -1,0 +1,259 @@
+{
+	"info": {
+		"_postman_id": "fbc455fb-cc82-45e3-a0e2-7634f19b28a1",
+		"name": "Comez API Collection",
+		"description": "Postman Collection for testing the Comez API. Includes endpoints for Products & Inventory, Order Details lookup, and Customer Lookup.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Products & Inventory",
+			"item": [
+				{
+					"name": "Read All Products",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "storename",
+								"value": "{{storename}}",
+								"type": "text"
+							},
+							{
+								"key": "x-custom-domain",
+								"value": "false",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/editor/ecommerce/getallproducts",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"editor",
+								"ecommerce",
+								"getallproducts"
+							]
+						},
+						"description": "Retrieves all products from the store, including variants, pricing, stock levels, and media URLs."
+					},
+					"response": []
+				},
+				{
+					"name": "Read Detailed Inventory",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "storename",
+								"value": "{{storename}}",
+								"type": "text"
+							},
+							{
+								"key": "x-custom-domain",
+								"value": "false",
+								"type": "text"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{admin_token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/editor/ecommerce/inventory",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"editor",
+								"ecommerce",
+								"inventory"
+							]
+						},
+						"description": "Protected endpoint returning detailed inventory records (onHand, available, committed, unavailable) per product variant."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Order Details",
+			"item": [
+				{
+					"name": "Get Order Details",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "storename",
+								"value": "{{storename}}",
+								"type": "text"
+							},
+							{
+								"key": "x-custom-domain",
+								"value": "false",
+								"type": "text"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{admin_token}}",
+								"type": "text"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"id\": 1245\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/editor/ecommerce/getorderdetails",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"editor",
+								"ecommerce",
+								"getorderdetails"
+							]
+						},
+						"description": "Retrieves comprehensive information for a specific order by ID, including order items, pricing, delivery status, shipping address, and merchant company info."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Customer Lookup",
+			"item": [
+				{
+					"name": "Get Customer By ID",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "storename",
+								"value": "{{storename}}",
+								"type": "text"
+							},
+							{
+								"key": "x-custom-domain",
+								"value": "false",
+								"type": "text"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{admin_token}}",
+								"type": "text"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"id\": 882\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/editor/ecommerce/getcustomerbyid",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"editor",
+								"ecommerce",
+								"getcustomerbyid"
+							]
+						},
+						"description": "Retrieves customer information, including metadata and order history, matching a specific user ID."
+					},
+					"response": []
+				},
+				{
+					"name": "Search Customers (By Name)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "storename",
+								"value": "{{storename}}",
+								"type": "text"
+							},
+							{
+								"key": "x-custom-domain",
+								"value": "false",
+								"type": "text"
+							},
+							{
+								"key": "Authorization",
+								"value": "Bearer {{admin_token}}",
+								"type": "text"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"search\": \"Jane\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/editor/ecommerce/searchcustomersdetail",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"editor",
+								"ecommerce",
+								"searchcustomersdetail"
+							]
+						},
+						"description": "Performs a name lookup against active store customers matching the search term."
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:3000",
+			"type": "string"
+		},
+		{
+			"key": "storename",
+			"value": "public",
+			"type": "string"
+		},
+		{
+			"key": "admin_token",
+			"value": "YOUR_ADMIN_JWT_TOKEN",
+			"type": "string"
+		}
+	]
+}

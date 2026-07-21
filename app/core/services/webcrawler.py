@@ -14,10 +14,14 @@ from app.core.config.db import initialize_light_rag
 from typing import List
 import json
 from app.core.config.config import settings
+from app.core.config.gemini_client import get_genai_client
 from app.core.schema.applicationerror import ApplicationError
 from app.core.models.dbontrollers.admindbcontroller import AdminDbContoller
 from app.core.schema.schema import StoreDNA
-client = genai.Client()
+
+
+def _get_client() -> genai.Client:
+    return get_genai_client()
 
 
 class Services():
@@ -123,7 +127,7 @@ class Services():
         texts = [node.page_content for node in nodes]
         embeddings = []
         for text_batch in batch(texts, batch_size):
-            response = client.models.embed_content(
+            response = _get_client().models.embed_content(
                 model="gemini-embedding-001",
                 contents=text_batch,
                 config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT", output_dimensionality=768)
@@ -199,7 +203,7 @@ class Services():
 
     @staticmethod
     async def generate_embedding(text: str):
-        response = client.models.embed_content(
+        response = _get_client().models.embed_content(
             model="gemini-embedding-001",
             contents=[text],
             config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY", output_dimensionality=768)
@@ -218,7 +222,7 @@ class Services():
             return []
 
         # 2. Send the LIST directly to 'contents'
-        response = client.models.embed_content(
+        response = _get_client().models.embed_content(
             model="gemini-embedding-001", # Recommendation: Use 004 (Newer/Better)
             contents=texts,
             config=types.EmbedContentConfig(
@@ -279,7 +283,7 @@ Product Titles: {', '.join(titles)}
 About Us: {about_text}
 """
             schema = StoreDNA.model_json_schema()
-            response = client.models.generate_content(
+            response = _get_client().models.generate_content(
                 model="gemini-2.5-flash",
                 contents=dna_prompt,
                 config={
@@ -350,7 +354,7 @@ You are a helpful AI assistant answering questions using ONLY the provided conte
             # Convert Pydantic model to JSON schema
             json_schema = llmresponse.model_json_schema()
             
-            response = client.models.generate_content(
+            response = _get_client().models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
                 config={
