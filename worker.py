@@ -63,11 +63,13 @@ async def _process_one_task(controller: AdminDbContoller, task):
             task_data = task.task_data or {}
             urls = task_data.get("urls", [])
             files = task_data.get("files", [])
+            source_name = task_data.get("source_name")
             await AppController.create_vectors_background_task(
                 task.chatbot_id,
                 urls,
                 files,
                 task.user_id,
+                source_name=source_name,
             )
             await controller.update_background_task_status(
                 task.id,

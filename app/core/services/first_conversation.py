@@ -87,6 +87,7 @@ Write a opening message that:
 5. Ends with a natural invitation to continue (question or offer to help).
 
 Also provide exactly 2-3 short suggested_actions (under 8 words each) the customer might tap next.
+Do NOT include "Add to cart", "Add … to cart", or any suggestion that asks the assistant to add a product to the cart — cart adds only work from the product card button, not from chat chips.
 
 Output ONLY valid JSON matching the schema."""
 

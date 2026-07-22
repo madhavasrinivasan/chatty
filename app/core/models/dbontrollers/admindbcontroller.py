@@ -611,6 +611,7 @@ class AdminDbContoller:
                     "total_products": 0,
                     "total_pages": 0,
                     "total_policies": 0,
+                    "total_custom": 0,
                     "last_synced_at": None,
                     "sync_status": "idle",
                 }
@@ -637,10 +638,15 @@ class AdminDbContoller:
             
             total_policies = total_policies_policy + total_policies_page
 
+            total_custom = await self.models.store_knowledge.filter(
+                store_id__in=store_ids, data_type="custom"
+            ).count()
+
             return {
                 "total_products": total_products,
                 "total_pages": total_pages,
                 "total_policies": total_policies,
+                "total_custom": total_custom,
                 "last_synced_at": store.last_synced_at.isoformat() if store.last_synced_at else None,
                 "sync_status": store.sync_status,
             }
@@ -658,3 +664,115 @@ class AdminDbContoller:
         except Exception as e:
             print(f"Error setting needs_human to {needs_human} on session {session_id}: {e}")
             raise ApplicationError.InternalServerError("Cannot update session handover status")
+
+    async def create_add_to_cart_event(
+        self,
+        *,
+        store_id: int,
+        chatbot_id: int | None,
+        session_id: str | None,
+        shop_domain: str | None,
+        product_id: str | None,
+        variant_id: str | None,
+        title: str | None,
+        quantity: int,
+        unit_price: float,
+        currency: str,
+        line_revenue: float,
+    ):
+        try:
+            return await self.models.AddToCartEvent.create(
+                store_id=store_id,
+                chatbot_id=chatbot_id,
+                session_id=session_id,
+                shop_domain=shop_domain,
+                product_id=product_id,
+                variant_id=variant_id,
+                title=title,
+                quantity=quantity,
+                unit_price=unit_price,
+                currency=currency or "INR",
+                line_revenue=line_revenue,
+            )
+        except Exception as e:
+            print(f"Error creating add_to_cart event: {e}")
+            raise ApplicationError.InternalServerError("Cannot log add to cart event")
+
+    async def get_dashboard_stats_for_user(self, user_id: int) -> dict:
+        """
+        Aggregate dashboard metrics for the merchant's primary store:
+        ATC clicks + attributed revenue, queries answered, LLM tokens + cost.
+        """
+        from datetime import datetime, timezone
+        from app.core.services.token_tracker import usd_to_inr, USD_TO_INR
+
+        store = await self.find_first_ecom_store_by_user_id(user_id)
+        if not store:
+            return {
+                "store_id": None,
+                "add_to_cart_clicks": 0,
+                "attributed_revenue": 0.0,
+                "currency": "INR",
+                "queries_answered": 0,
+                "questions_answered": 0,
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "total_tokens": 0,
+                "total_cost_usd": 0.0,
+                "total_cost_inr": 0.0,
+                "usd_to_inr_rate": USD_TO_INR,
+                "active_sessions_today": 0,
+            }
+
+        store_id = store.id
+        shop_domain = self._normalize_shop_domain(store.store_name or "")
+
+        atc_qs = self.models.AddToCartEvent.filter(store_id=store_id)
+        add_to_cart_clicks = await atc_qs.count()
+        revenue_rows = await self.models.AddToCartEvent.filter(store_id=store_id).values_list(
+            "line_revenue", flat=True
+        )
+        attributed_revenue = round(sum(float(r or 0) for r in revenue_rows), 2)
+
+        queries_answered = 0
+        questions_answered = 0
+        active_sessions_today = 0
+        if shop_domain:
+            session_ids = await self.models.ChatSession.filter(shop_domain=shop_domain).values_list(
+                "id", flat=True
+            )
+            if session_ids:
+                queries_answered = await self.models.ChatMessage.filter(
+                    session_id__in=session_ids, role="user"
+                ).count()
+                questions_answered = await self.models.ChatMessage.filter(
+                    session_id__in=session_ids, role="assistant"
+                ).count()
+
+            start_of_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            active_sessions_today = await self.models.ChatSession.filter(
+                shop_domain=shop_domain,
+                status="active",
+                updated_at__gte=start_of_day,
+            ).count()
+
+        tin = int(getattr(store, "total_input_tokens", 0) or 0)
+        tout = int(getattr(store, "total_output_tokens", 0) or 0)
+        tcost_usd = float(getattr(store, "total_cost_usd", 0.0) or 0.0)
+        tcost_inr = usd_to_inr(tcost_usd)
+
+        return {
+            "store_id": store_id,
+            "add_to_cart_clicks": add_to_cart_clicks,
+            "attributed_revenue": attributed_revenue,
+            "currency": "INR",
+            "queries_answered": queries_answered,
+            "questions_answered": questions_answered,
+            "total_input_tokens": tin,
+            "total_output_tokens": tout,
+            "total_tokens": tin + tout,
+            "total_cost_usd": round(tcost_usd, 8),
+            "total_cost_inr": tcost_inr,
+            "usd_to_inr_rate": USD_TO_INR,
+            "active_sessions_today": active_sessions_today,
+        }

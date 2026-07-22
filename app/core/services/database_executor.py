@@ -15,7 +15,8 @@ from app.core.services.webcrawler import Services
 
 
 # Store knowledge types we search (collection stored as 'collect' in DB)
-SEARCH_DATA_TYPES = ("product", "page", "collect")
+SEARCH_DATA_TYPES = ("product", "page", "collect", "custom")
+_SEARCH_TYPES_SQL = "'product', 'page', 'collect', 'custom'"
 
 
 def _build_catalog_browse_sql(
@@ -80,7 +81,7 @@ def _build_keyword_only_sql(
            ts_rank(to_tsvector('english', title || ' ' || coalesce(content, '')), websearch_to_tsquery('english', $2)) AS keyword_score
     FROM store_knowledge
     WHERE store_id = $1
-      AND data_type IN ('product', 'page', 'collect')
+      AND data_type IN ('product', 'page', 'collect', 'custom')
       AND to_tsvector('english', title || ' ' || coalesce(content, '')) @@ websearch_to_tsquery('english', $2)
       {filter_sql}
     {order_sql}
@@ -132,7 +133,7 @@ def _build_path_a_sql_explicit(
     SELECT id, title, content, price, url, image_url
     FROM store_knowledge
     WHERE store_id = $1
-      AND data_type IN ('product', 'page', 'collect')
+      AND data_type IN ('product', 'page', 'collect', 'custom')
       {keyword_sql}
       {filter_sql}
     ORDER BY {order_col} {order_dir} NULLS LAST
@@ -193,6 +194,7 @@ def _build_path_b_sql(
                ROW_NUMBER() OVER (ORDER BY ts_rank(to_tsvector('english', title || ' ' || coalesce(content, '')), websearch_to_tsquery('english', ${keyword_param_pos})) DESC) as rank_k
         FROM store_knowledge
         WHERE store_id = $1
+          AND data_type IN ('product', 'page', 'collect', 'custom')
           AND to_tsvector('english', title || ' ' || coalesce(content, '')) @@ websearch_to_tsquery('english', ${keyword_param_pos})
           {filter_sql}
         LIMIT 40
@@ -231,7 +233,7 @@ def _build_path_b_sql(
                ROW_NUMBER() OVER (ORDER BY embedding <=> $2::vector) as rank_v
         FROM store_knowledge
         WHERE store_id = $1
-          AND data_type IN ('product', 'page', 'collect')
+          AND data_type IN ('product', 'page', 'collect', 'custom')
           AND embedding IS NOT NULL
           {filter_sql}
         ORDER BY embedding <=> $2::vector

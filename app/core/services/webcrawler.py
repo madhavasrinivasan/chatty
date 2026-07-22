@@ -150,24 +150,36 @@ class Services():
 
 
     @staticmethod
-    async def extract_pdf_pages_readable(pdf_path: str):
+    async def extract_pdf_pages_readable(pdf_path: str, max_pages: int | None = 50):
+        """
+        Extract non-empty PDF pages as readable text.
+        If max_pages is set, only the first max_pages pages of the PDF are considered
+        (empty pages still count toward the cap so page numbers stay consistent).
+        Raises ValueError if the PDF has more pages than max_pages.
+        """
         loader = PyPDFLoader(pdf_path)
         docs = loader.load()
-         
-        pages = []
 
-        for doc in docs:
+        total_pdf_pages = len(docs)
+        if max_pages is not None and total_pdf_pages > max_pages:
+            raise ValueError(
+                f"PDF has {total_pdf_pages} pages; maximum allowed is {max_pages}."
+            )
+
+        pages = []
+        for doc in docs[: max_pages if max_pages is not None else None]:
             text = doc.page_content
             meta = doc.metadata
 
             if not text or not text.strip():
                 continue
 
+            source = meta.get("source") or pdf_path
             pages.append({
                 "text": text,
                 "page_number": meta.get("page_label") or meta.get("page", 0) + 1,
-                "file_name": meta.get("source").split("/")[-1],
-                "total_pages": meta.get("total_pages"),
+                "file_name": str(source).split("/")[-1],
+                "total_pages": meta.get("total_pages") or total_pdf_pages,
             })
 
         return pages

@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from app.core.config.config import settings
-from app.core.config.gemini_client import get_genai_client
+from app.core.config.gemini_client import generate_content_text, get_genai_client
 from app.core.schema.schema import (
     FinalFrontendResponse,
     FrontendProductCard,
@@ -29,7 +29,7 @@ try:
 except Exception:
     _get_genai_client = None  # type: ignore
 
-MODEL = "gemini-2.5-flash"
+MODEL = settings.gemini_synthesis_model or "gemini-2.5-flash-lite"
 
 
 async def get_variant_data_from_db(
@@ -249,18 +249,23 @@ async def generate_final_response(
         "(active session, past chats, facts, orders, and current cart) to sell like a knowledgeable human rep who is trusted with real store data.\n\n"
         "TONE & BEHAVIOR RULES (follow all):\n"
         "1. BE ASSUMPTIVE, NOT PERMISSION-SEEKING. Recommend directly and drive toward the sale. "
-        "Say 'Here's the X in your size — want me to add it to your cart?' NOT 'You might like…' or 'I can look into that.'\n"
+        "Say 'Here's the X in your size — tap Add to cart on the card if you want it.' NOT 'You might like…' or 'I can look into that.'\n"
         "2. ALWAYS CITE EXACT NUMBERS. State exact price with currency and, when a product has a discount, the exact percentage or amount AND the exact code "
         "(e.g. 'It's $48.00, and 15% off right now with code SAVE15'). NEVER use vague phrasing like 'some savings' or 'a discount'.\n"
         "3. ALWAYS END WITH A NEXT STEP. Every general_answer must close with a specific action or question "
-        "(e.g. 'Want me to add the Black XL to your cart?' or 'Should I pull up the size guide?'). Never leave a dead end.\n"
+        "(e.g. 'Tap Add to cart on the card below' or 'Should I pull up the size guide?'). Never leave a dead end.\n"
         "4. NEVER CLAIM YOU LACK ACCESS to data that is already provided above. If facts, past orders, the cart, or catalog results are in context, use them confidently. "
         "Never say things like 'I don't have access to that' when the information is present.\n"
         "5. NEVER MENTION STOCK OR AVAILABILITY. Do NOT say an item is in stock, low stock, or sold out, and do NOT add stock disclaimers. "
         "Inventory is verified separately by the system, not by you.\n"
         "6. PERSONALIZE. Acknowledge past conversations when relevant and suggest items based on past orders (e.g., sizing up, complementary items).\n"
         "7. DISCOUNTS. If any product in the context has a non-empty `discount_info` list, you MUST surface it in general_answer with the exact number and code. "
-        "When multiple products have discounts, lead with the best one.\n\n"
+        "When multiple products have discounts, lead with the best one.\n"
+        "8. YOU CANNOT ADD TO CART VIA CHAT. Adding to cart only works from the product card button in the UI. "
+        "Never offer to add items yourself, never say 'want me to add … to your cart?', and never use suggested_actions "
+        "like 'Add X to cart' or 'Add to cart' — those become chat messages and cannot add to cart. "
+        "Point shoppers to the card's Add to cart button instead; keep suggested_actions as questions or browse/help asks "
+        "(e.g. 'Show me similar styles', 'Do you have a size guide?', 'What colors does this come in?').\n\n"
     )
     prompt = f"""{instruction}{memory_block}Current user question: "{user_query}".
 
@@ -268,10 +273,10 @@ Search results from our catalog (use these to answer and to pick products):
 {context}
 
 Output a JSON object with this exact shape. Use empty lists [] when not relevant.
-- general_answer: Markdown answer written as an assumptive sales rep. Recommend directly, cite exact prices/discount %/codes, and end with a specific next action or question. Do NOT mention stock/availability or claim missing access.
+- general_answer: Markdown answer written as an assumptive sales rep. Recommend directly, cite exact prices/discount %/codes, and end with a specific next action or question. Do NOT mention stock/availability or claim missing access. Do NOT offer to add items to cart yourself — point to the product card button if relevant.
 - urls: List of policy/sizing/collection URLs to show. Empty [] if none.
 - selected_products: List of {{ "product_id": "<id from results>", "requested_options": [] or e.g. ["Black","XL"] }}. Empty [] if not product-related.
-- suggested_actions: 2-3 short, action-oriented follow-ups for the UI (e.g. "Add to cart", "See the size guide").
+- suggested_actions: 2-3 short follow-up questions or browse asks for the UI (e.g. "See the size guide", "Show similar styles", "What colors are available?"). NEVER include "Add to cart", "Add … to cart", or any phrase that asks the assistant to add a product to the cart.
 - if there is product list and it related always addd to selected_products list , if not related then don't add to selected_products list. the max is 5 products.
 
 Output ONLY valid JSON, no markdown code block."""
@@ -280,19 +285,17 @@ Output ONLY valid JSON, no markdown code block."""
     llm_output: LLMSynthesisOutput
     output_tokens = 0
     try:
-        if _get_genai_client is None:
-            raise RuntimeError("GenAI not available")
-        client = _get_genai_client()
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config={
+        raw = generate_content_text(
+            MODEL,
+            prompt,
+            {
                 "response_mime_type": "application/json",
                 "response_json_schema": LLMSynthesisOutput.model_json_schema(),
-                "thinking_config": {"thinking_budget": 0},
+                # No max_output_tokens cap: with dynamic thinking (-1) a low cap can be
+                # consumed by thinking and truncate/empty the answer.
+                "thinking_config": {"thinking_budget": settings.gemini_synthesis_thinking_budget},
             },
         )
-        raw = getattr(response, "text", None) or str(response)
         output_tokens = estimate_tokens(raw or "")
         data = json.loads(raw)
         llm_output = LLMSynthesisOutput(

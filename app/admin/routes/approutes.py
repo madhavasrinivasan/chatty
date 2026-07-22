@@ -6,7 +6,8 @@ from app.core.services.filehandler import FileHandler
 from app.core.schema.schema import (
     UploadKnowledgeBaseRequest, AddshopifyRequest, OrchestratorRequest,
     LoadFirstConvoRequest, LoadFirstConvoResponse,
-    ChatbotCustomizationResponse, ChatbotCustomizationUpdate, KnowledgeSummary
+    ChatbotCustomizationResponse, ChatbotCustomizationUpdate, KnowledgeSummary,
+    AddToCartTrackRequest,
 )
 from app.core.schema.schema import llmrequest, llmresponse
 from app.core.services.first_conversation import generate_first_conversation_greeting
@@ -143,7 +144,12 @@ async def get_or_create_session(
 
 
 async def get_uploaded_files(files: Optional[List[UploadFile]] = File(None)):
-    if files is None or (isinstance(files, list) and len(files) == 0):
+    if files is None:
+        return None
+    # FastAPI may pass a single UploadFile when only one file is sent
+    if not isinstance(files, list):
+        files = [files]
+    if len(files) == 0:
         return None
     file_handler = FileHandler()
     return await file_handler.upload_file(files)
@@ -170,6 +176,27 @@ async def get_store_token_usage(user: dict = Depends(AppController.validate_chat
 async def get_llm_usage(user: dict = Depends(AppController.validate_user)):
     """Cumulative estimated LLM usage (input/output tokens + cost) for the merchant's store."""
     return await AppController.get_merchant_llm_usage(user)
+
+
+@adminapprouter.get("/dashboard-stats", response_model=APIResponse)
+async def get_dashboard_stats(user: dict = Depends(AppController.validate_user)):
+    """
+    Overview dashboard metrics:
+    add-to-cart clicks, attributed ATC revenue, queries/questions answered, tokens + cost.
+    """
+    return await AppController.get_dashboard_stats(user)
+
+
+@adminapprouter.post("/analytics/add-to-cart", response_model=APIResponse)
+async def track_add_to_cart(
+    body: AddToCartTrackRequest,
+    user: dict = Depends(AppController.validate_chatbot_api_key),
+):
+    """
+    Widget: log a successful Add to cart from a product card.
+    Auth: x-api-key / chatty-api-key (same as chatbot).
+    """
+    return await AppController.track_add_to_cart(user, body)
 
 
 @adminapprouter.post("/uploadknowlegdebase", response_model=APIResponse)

@@ -9,7 +9,7 @@ from typing import Any
 from google import genai
 
 from app.core.config.config import settings
-from app.core.config.gemini_client import get_genai_client
+from app.core.config.gemini_client import generate_content_text, get_genai_client
 from app.core.schema.schema import IntentRoute, SearchPayload, SearchPayloadFilters, UnifiedRouterOutput
 from app.core.services.shopify_service import get_order_status
 from app.core.services.token_tracker import (
@@ -28,7 +28,7 @@ def _get_client() -> genai.Client:
     return _client
 
 
-MODEL = "gemini-2.5-flash"
+MODEL = settings.gemini_router_model or "gemini-2.5-flash-lite"
 
 
 VALID_ROUTES = frozenset({"ORDER_SUPPORT", "GENERAL_CHAT", "FOLLOW_UP_QUESTION", "RETURN_REQUEST", "HYBRID_SEARCH", "GRAPH_SEARCH", "PARALLEL_SEARCH"})
@@ -333,13 +333,11 @@ def _get_return_specialist_response(
 
 Reply as the Return Specialist. If the user has given their order number (and no item list has been shown yet), end your message with [ACTION:FETCH_ORDER | order: #<order_number>]. If they have already provided order number, item, and reason, end with [ACTION:CREATE_RETURN | ...] as specified."""
     try:
-        client = _get_client()
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config={"thinking_config": {"thinking_budget": 0}},
+        raw = generate_content_text(
+            MODEL,
+            prompt,
+            {"thinking_config": {"thinking_budget": 0}},
         )
-        raw = getattr(response, "text", None) or str(response)
         text = (raw or "").strip() or "I can help with returns. Please share your order number, the item you want to return, and the reason."
         usage = {
             "return_specialist": {
@@ -368,13 +366,11 @@ Reply in one or two short sentences: be warm and conversational, and do NOT sear
 ALWAYS end by offering a concrete next step so the conversation never dead-ends — e.g. "Want me to show today's bestsellers, or look up an order for you?"
 Never claim you can't help or lack access; steer them toward something you can do."""
     try:
-        client = _get_client()
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config={"thinking_config": {"thinking_budget": 0}},
+        raw = generate_content_text(
+            MODEL,
+            prompt,
+            {"thinking_config": {"thinking_budget": 0}},
         )
-        raw = getattr(response, "text", None) or str(response)
         text = (raw or "").strip() or "How can I help you today?"
         usage = {
             "general_chat": {
@@ -463,6 +459,9 @@ SEARCH PAYLOAD RULES (only when route is HYBRID_SEARCH):
 
 For non-HYBRID_SEARCH routes, leave ALL search fields as null.
 
+DISCOUNT DETECTION:
+- Set "wants_discounts" to true whenever the user asks about discounts, coupons, promo/voucher codes, offers, deals, sales, price cuts, OR free shipping / shipping offers / minimum-for-free-shipping (e.g. "any coupons?", "is there free shipping?", "what deals do you have?"). Otherwise false.
+
 Output ONLY valid JSON. No markdown code blocks.
 
 Current user message: {current_message}"""
@@ -491,17 +490,16 @@ class RouterAndExpander:
             discounts_summary,
         )
         try:
-            client = _get_client()
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=prompt,
-                config={
+            raw = generate_content_text(
+                MODEL,
+                prompt,
+                {
                     "response_mime_type": "application/json",
                     "response_json_schema": UnifiedRouterOutput.model_json_schema(),
-                    "thinking_config": {"thinking_budget": 0},
+                    "thinking_config": {"thinking_budget": settings.gemini_router_thinking_budget},
+                    "max_output_tokens": 512,
                 },
             )
-            raw = getattr(response, "text", None) or str(response)
             data = json.loads(raw)
             route = data.get("route") if isinstance(data.get("route"), str) else None
             if route not in VALID_ROUTES:

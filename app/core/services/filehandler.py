@@ -35,21 +35,41 @@ class FileHandler:
                 file_name = file.filename
                 # Handle None content_type
                 content_type = file.content_type or ""
-                file_extension = mimetypes.guess_extension(content_type)
+                file_extension = mimetypes.guess_extension(content_type) or ""
+                name_lower = file_name.lower()
+                is_pdf = (
+                    file_extension == ".pdf"
+                    or name_lower.endswith(".pdf")
+                    or content_type in ("application/pdf", "application/x-pdf")
+                )
                 
                 # Check if file is PDF and size is valid
-                if file_extension != ".pdf":
+                if not is_pdf:
                     raise ApplicationError.BadRequest(f"Invalid file type. Only PDF files are allowed. File: {file_name}")
+                file_extension = ".pdf"
                 
-                if file.size > max_size:
+                # UploadFile.size can be None depending on client; fall back to reading length after write if needed
+                declared_size = getattr(file, "size", None)
+                if declared_size is not None and declared_size > max_size:
                     raise ApplicationError.BadRequest(f"File size exceeds maximum allowed size ({max_size} bytes). File: {file_name}")
                 
                 file_path = os.path.join(upload_dir, file_name)
+                total_written = 0
                 async with aiofiles.open(file_path, "wb") as out_file:
                     while True:
                         chunk = await file.read(20 *1024 * 1024) # 20MB chunk size
                         if not chunk:
                             break
+                        total_written += len(chunk)
+                        if total_written > max_size:
+                            await out_file.close()
+                            try:
+                                os.remove(file_path)
+                            except OSError:
+                                pass
+                            raise ApplicationError.BadRequest(
+                                f"File size exceeds maximum allowed size ({max_size} bytes). File: {file_name}"
+                            )
                         await out_file.write(chunk)
                 
                 file_dict: dict = {
@@ -59,6 +79,8 @@ class FileHandler:
                 }
                 file_paths.append(file_dict)
             return file_paths
+        except ApplicationError:
+            raise
         except Exception as e:
             print(f"error uploading file: {e}")
             raise ApplicationError.SomethingWentWrong("Error uploading file")

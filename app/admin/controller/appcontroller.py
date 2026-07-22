@@ -129,6 +129,8 @@ class  AppController:
         return AppController.decode_chatbot_api_key(api_key)
 
     
+    MAX_CUSTOM_PDF_PAGES = 50
+
     @staticmethod
     async def upload_knowledge_base(user: dict, file_path: Optional[List[dict]], request, background_tasks: BackgroundTasks = None):
         try: 
@@ -143,37 +145,44 @@ class  AppController:
              if not chatbot or chatbot is None:
                 raise ApplicationError.SomethingWentWrong("Cannot create chatbot")
 
-             files:List[str] = []
+             files: List[dict] = []
 
              if file_path:
+                 from pypdf import PdfReader
                  for file in file_path:
-                    file_dict:dict = {
+                    pdf_name = file["file_name"]
+                    full_pdf_path = os.path.join(directory, pdf_name)
+                    try:
+                        reader = PdfReader(full_pdf_path)
+                        page_count = len(reader.pages)
+                    except Exception as e:
+                        print(f"PDF page count failed for {pdf_name}: {e}")
+                        raise ApplicationError.BadRequest(f"Could not read PDF: {pdf_name}")
+                    if page_count > AppController.MAX_CUSTOM_PDF_PAGES:
+                        raise ApplicationError.BadRequest(
+                            f"'{pdf_name}' has {page_count} pages. Maximum allowed is {AppController.MAX_CUSTOM_PDF_PAGES}."
+                        )
+                    file_dict: dict = {
                         "asset_type": "pdf",
                         "user_id": user["id"],
                         "chatbot_id": chatbot.id,
-                        "name": file["file_name"],
+                        "name": pdf_name,
+                        "page_count": page_count,
                     }
-                    files.append(file_dict) 
-
-            #  for url in request.urls:
-            #     file_dict:dict = {
-            #         "asset_type": "url",
-            #         "user_id": user["id"],
-            #         "chatbot_id": chatbot.id,
-            #         "name": url,
-            #     }
-            #     files.append(file_dict) 
+                    files.append(file_dict)
 
              print(f"Files: {files}")
 
              add_assest = await AdminDbContoller().add_assest(chatbot.id, files)
 
              # Create background task in database (will be picked up by polling worker)
+             # Signature: create_background_task(user_id, chatbot_id, task_data)
              task_data = {
                  "urls": request.urls if request.urls else [],
-                 "files": files
+                 "files": files,
+                 "source_name": (getattr(request, "name", None) or "").strip() or None,
              }
-             await AdminDbContoller().create_background_task(chatbot.id, user["id"], task_data)
+             await AdminDbContoller().create_background_task(user["id"], chatbot.id, task_data)
 
              # Convert Tortoise model to dict for serialization
              chatbot_dict = {
@@ -188,11 +197,13 @@ class  AppController:
              
              return APIResponse(
                 success=True,
-                message="Knowledge base uploaded successfull",
+                message="Knowledge base uploaded; custom PDFs will be embedded in the background",
                 data=chatbot_dict
              )
             
 
+        except ApplicationError:
+            raise
         except Exception as e:
             print(f"error uploading knowledge base: {e}")
             error_message = getattr(e, 'message', str(e))
@@ -200,72 +211,151 @@ class  AppController:
 
 
     @staticmethod
-    async def create_vectors_background_task(chatbot_id: int, urls: list, files: list, user_id: int):
+    async def create_vectors_background_task(
+        chatbot_id: int,
+        urls: list,
+        files: list,
+        user_id: int,
+        source_name: str | None = None,
+    ):
+        """
+        Embed custom PDFs (and optional URL crawls) into store_knowledge as data_type='custom'
+        so hybrid chat search can retrieve them (same path as Shopify pages).
+        LightRAG is skipped here until GRAPH_SEARCH is wired into the hybrid flow.
+        """
         try:
-            print(f"Creating vectors background task for chatbot: {chatbot_id}")
-            documents: list = []
+            print(f"Creating custom knowledge vectors for chatbot={chatbot_id} user={user_id}")
+            controller = AdminDbContoller()
+            splitter = AppController._CONTENT_SPLITTER
 
-            # Process URLs
+            store = None
+            if chatbot_id:
+                store = await controller.find_one_ecom_store(chatbot_id)
+            if store is None and user_id:
+                store = await controller.find_first_ecom_store_by_user_id(user_id)
+            if not store:
+                raise ApplicationError.NotFound(
+                    "No ecom store found for this merchant; connect Shopify before uploading custom PDFs"
+                )
+            store_id = store.id
+            display_name = (source_name or "").strip()
+
+            all_chunks: list[dict] = []
+
+            # --- PDFs → custom chunks (max 50 pages, enforced in extract) ---
+            if files and len(files) > 0:
+                for file_dict in files:
+                    pdf_path = file_dict.get("name") if isinstance(file_dict, dict) else file_dict
+                    if not pdf_path:
+                        continue
+                    full_pdf_path = os.path.join(directory, pdf_path)
+                    if not os.path.isfile(full_pdf_path):
+                        print(f"PDF not found on disk: {full_pdf_path}", flush=True)
+                        continue
+                    try:
+                        pdf_docs = await Services.extract_pdf_pages_readable(
+                            full_pdf_path, max_pages=AppController.MAX_CUSTOM_PDF_PAGES
+                        )
+                    except ValueError as ve:
+                        raise ApplicationError.BadRequest(str(ve))
+
+                    doc_label = display_name or os.path.splitext(str(pdf_path))[0]
+                    file_hash = hashlib.md5(f"{store_id}:{pdf_path}".encode()).hexdigest()[:10]
+                    handle = re.sub(r"[^a-z0-9\-]+", "-", doc_label.lower()).strip("-")[:200] or "custom-doc"
+
+                    for pdf_doc in pdf_docs:
+                        page_no = int(pdf_doc.get("page_number") or 0)
+                        total_pages = pdf_doc.get("total_pages") or len(pdf_docs)
+                        page_text = (pdf_doc.get("text") or "").strip()
+                        if not page_text:
+                            continue
+                        title = f"{doc_label} (p.{page_no})"
+                        content = (
+                            f"Custom document: {doc_label}. "
+                            f"Page {page_no}/{total_pages}.\n\n{page_text}"
+                        )
+                        doc = LangchainDocument(
+                            page_content=content,
+                            metadata={
+                                "title": title,
+                                "handle": handle,
+                                "page_number": page_no,
+                                "file_name": pdf_path,
+                            },
+                        )
+                        chunks = splitter.split_documents([doc])
+                        for j, ch in enumerate(chunks):
+                            # Keep shopify_product_id ≤ 50 chars
+                            source_id = f"c{store_id}_{file_hash}_p{page_no}_c{j}"[:50]
+                            all_chunks.append({
+                                "source_id": source_id,
+                                "handle": handle,
+                                "title": title,
+                                "content": ch.page_content,
+                                "url": f"file://{pdf_path}#page={page_no}",
+                                "content_hash": hashlib.md5(ch.page_content.encode()).hexdigest(),
+                            })
+
+            # --- Optional URLs → custom chunks (same store_knowledge path) ---
             if urls and len(urls) > 0:
                 crawl_results = await Services.crawlweb(urls)
                 crawled_docs = await Services.crawl_results_to_documents(
                     crawl_results, {"chatbot_id": chatbot_id, "user_id": user_id}
                 )
-                documents.extend(crawled_docs) 
+                for idx, node in enumerate(crawled_docs):
+                    page_content = (node.get("page_content") or "").strip()
+                    if not page_content:
+                        continue
+                    meta = node.get("metadata") or {}
+                    url = meta.get("url") or f"url_{idx}"
+                    title = display_name or meta.get("title") or url
+                    handle = re.sub(r"[^a-z0-9\-]+", "-", str(title).lower()).strip("-")[:200] or "custom-url"
+                    url_hash = hashlib.md5(f"{store_id}:{url}".encode()).hexdigest()[:10]
+                    content = f"Custom document: {title}. Source: {url}.\n\n{page_content}"
+                    doc = LangchainDocument(page_content=content, metadata={"title": title, "url": url})
+                    chunks = splitter.split_documents([doc])
+                    for j, ch in enumerate(chunks):
+                        source_id = f"c{store_id}_{url_hash}_u{idx}_c{j}"[:50]
+                        all_chunks.append({
+                            "source_id": source_id,
+                            "handle": handle,
+                            "title": str(title)[:500],
+                            "content": ch.page_content,
+                            "url": url,
+                            "content_hash": hashlib.md5(ch.page_content.encode()).hexdigest(),
+                        })
 
-                # for crawl_result in crawl_results:
-                # documents.append({"crawlaai":crawl_results})
-            # Process PDF files
-            if files and len(files) > 0:
-                for file_dict in files:
-                    pdf_path = file_dict.get("name") if isinstance(file_dict, dict) else file_dict
-                    full_pdf_path = os.path.join(directory, pdf_path)
-                    pdf_docs = await Services.extract_pdf_pages_readable(full_pdf_path)
-                    for pdf_doc in pdf_docs:
-                        doc = {
-                            "page_content": pdf_doc["text"],
-                            "metadata": {
-                                "source_type": "pdf",
-                                "file_name": pdf_path,
-                                "page_number": pdf_doc.get("page_number"),
-                                "total_pages": pdf_doc.get("total_pages"),
-                                "chatbot_id": chatbot_id,
-                                "user_id": user_id,
-                            }
-                        }
-                        documents.append(doc)
-                    # documents.append({"pdf":pdf_doc})
-
-            if not documents:
-                print("No documents to insert into LightRAG")
-                return 
-
-            # with open("files.txt", "w", encoding="utf-8") as f:
-            #     f.write(str(documents))
-
-            # Get LightRAG instance for this workspace (store_${chatbot_id})
-            # Background task has no Request; use initialize_light_rag directly (no app.state).
-            workspace_id = f"store_{chatbot_id}"
-            rag = await initialize_light_rag(store_id=workspace_id)
-
-            # 1. Chunk documents into nodes (800 chars, overlap 120) via Services
-            # nodes = await Services.documents_to_nodes(documents)
-
-            # 2. Convert nodes to strings with SOURCE header for LightRAG
-            texts_to_insert = []
-            for node in documents:
-                source = node.get("metadata").get("url") or node.get("metadata").get("file_name") or "unknown_source"
-                final_text = f"--- SOURCE: {source} ---\n{node.get("page_content")}"
-                texts_to_insert.append(final_text)
-
-            if not texts_to_insert:
-                print("No content to insert into LightRAG")
+            if not all_chunks:
+                print("No custom chunks to embed", flush=True)
                 return
 
-            # 3. Insert into LightRAG (embedding, graph storage handled by LightRAG)
-            track_id = await rag.ainsert(input=texts_to_insert)
-            print(f"LightRAG insert completed for chatbot {chatbot_id}, track_id: {track_id}")
+            print(f"Embedding {len(all_chunks)} custom chunks into store_knowledge (store_id={store_id})", flush=True)
+            batch_size = 32
+            for start in range(0, len(all_chunks), batch_size):
+                batch = all_chunks[start : start + batch_size]
+                texts = [r["content"] for r in batch]
+                embeddings = await Services.generate_batch_embeddings(texts)
+                for i, row in enumerate(batch):
+                    emb = embeddings[i] if i < len(embeddings) else None
+                    await controller.insert_store_knowledge_raw(
+                        store_id=store_id,
+                        shopify_product_id=row["source_id"],
+                        handle=row["handle"],
+                        title=row["title"],
+                        content=row["content"],
+                        data_type="custom",
+                        url=row["url"],
+                        embedding=emb,
+                        content_hash=row.get("content_hash"),
+                    )
 
+            print(
+                f"✅ Custom knowledge ingest complete: {len(all_chunks)} chunks for store {store_id}",
+                flush=True,
+            )
+
+        except ApplicationError:
+            raise
         except Exception as e:
             print(f"error creating vectors background task: {e}")
             error_message = getattr(e, "message", str(e))
@@ -1318,6 +1408,7 @@ class  AppController:
         tin = int(getattr(store, "total_input_tokens", 0) or 0)
         tout = int(getattr(store, "total_output_tokens", 0) or 0)
         tcost = float(getattr(store, "total_cost_usd", 0.0) or 0.0)
+        from app.core.services.token_tracker import usd_to_inr, USD_TO_INR
         return APIResponse(
             success=True,
             message="LLM usage (tiktoken estimates; see token_usage.components per request for breakdown)",
@@ -1326,6 +1417,9 @@ class  AppController:
                 "total_input_tokens": tin,
                 "total_output_tokens": tout,
                 "total_cost_usd": round(tcost, 8),
+                "total_cost_inr": usd_to_inr(tcost),
+                "currency": "INR",
+                "usd_to_inr_rate": USD_TO_INR,
             },
         )
 
@@ -1569,5 +1663,59 @@ class  AppController:
             success=True,
             message=f"Session needs_human set to {needs_human}",
             data={"session_id": session_id, "needs_human": needs_human}
+        )
+
+    @staticmethod
+    async def track_add_to_cart(user: dict, body) -> APIResponse:
+        """Widget: log a successful Add to cart click for dashboard revenue attribution."""
+        store = None
+        if user.get("chatbot_id"):
+            store = await AdminDbContoller().find_one_ecom_store(user["chatbot_id"])
+        if store is None and user.get("id"):
+            store = await AdminDbContoller().find_first_ecom_store_by_user_id(user["id"])
+        if not store:
+            raise ApplicationError.NotFound("No store found")
+
+        qty = max(1, int(getattr(body, "quantity", 1) or 1))
+        unit_price = float(getattr(body, "unit_price", 0.0) or 0.0)
+        if unit_price < 0:
+            unit_price = 0.0
+        line_revenue = round(unit_price * qty, 2)
+        currency = (getattr(body, "currency", None) or "INR").strip()[:8] or "INR"
+        shop_domain = (getattr(body, "shop_domain", None) or "").strip() or None
+        if shop_domain:
+            shop_domain = AdminDbContoller()._normalize_shop_domain(shop_domain) or shop_domain
+
+        event = await AdminDbContoller().create_add_to_cart_event(
+            store_id=store.id,
+            chatbot_id=user.get("chatbot_id") or store.chatbot_id,
+            session_id=(getattr(body, "session_id", None) or None),
+            shop_domain=shop_domain,
+            product_id=getattr(body, "product_id", None),
+            variant_id=getattr(body, "variant_id", None),
+            title=getattr(body, "title", None),
+            quantity=qty,
+            unit_price=unit_price,
+            currency=currency,
+            line_revenue=line_revenue,
+        )
+        return APIResponse(
+            success=True,
+            message="Add to cart event logged",
+            data={
+                "id": event.id,
+                "line_revenue": line_revenue,
+                "quantity": qty,
+            },
+        )
+
+    @staticmethod
+    async def get_dashboard_stats(user: dict) -> APIResponse:
+        """Admin Overview: ATC clicks, attributed revenue, queries, tokens + cost."""
+        stats = await AdminDbContoller().get_dashboard_stats_for_user(user["id"])
+        return APIResponse(
+            success=True,
+            message="Dashboard stats fetched",
+            data=stats,
         )
         

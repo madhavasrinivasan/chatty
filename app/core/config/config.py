@@ -39,6 +39,19 @@ class Settings(BaseSettings):
     gemini_use_vertexai: bool = Field(default=False)
     gemini_project: str = Field(default="")
     gemini_location: str = Field(default="us-central1")
+    # Per-request hard timeout (ms) so a hung Gemini call can't stall the whole request.
+    # Thinking is OFF (budget 0) so calls are fast; raise this if you enable thinking.
+    gemini_timeout_ms: int = Field(default=12000)
+    # Automatic retry attempts on transient errors (429/5xx). 2 => 1 initial + up to 1 retry.
+    gemini_max_retries: int = Field(default=2)
+    # Models per stage. flash = higher quality; flash-lite = faster but lower quality.
+    gemini_router_model: str = Field(default="gemini-2.5-flash")
+    gemini_synthesis_model: str = Field(default="gemini-2.5-flash")
+    # Thinking budget per stage: 0 = thinking OFF (fastest), -1 = dynamic thinking
+    # (model decides, slowest but highest quality), N = fixed token budget.
+    # Both default OFF for lowest latency; bump synthesis to -1 or N for richer answers.
+    gemini_router_thinking_budget: int = Field(default=0)
+    gemini_synthesis_thinking_budget: int = Field(default=0)
 
     # Shopify (for OAuth / token exchange)
     shopify_api_key: str = Field(default="")

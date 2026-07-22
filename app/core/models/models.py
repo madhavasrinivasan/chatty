@@ -51,6 +51,8 @@ class store_knowledge_data_type(str, Enum):
     page = "page"
     # Use a shorter DB value due to existing VARCHAR(7) column; "collect" is 7 chars.
     collection = "collect"
+    # Custom merchant PDFs / manuals (fits VARCHAR(7)).
+    custom = "custom"
 
 
 class product_type(str, Enum):
@@ -393,6 +395,33 @@ class ChatMessage(models.Model):
         table = "chat_messages"
         indexes = [
             ("session",),
+            ("created_at",),
+        ]
+
+
+class AddToCartEvent(models.Model):
+    """Logged when a shopper successfully adds a product to cart from the chat widget."""
+
+    id = fields.BigIntField(pk=True)
+    store_id = fields.IntField(index=True)
+    chatbot_id = fields.IntField(null=True, index=True)
+    session_id = fields.CharField(max_length=64, null=True)
+    shop_domain = fields.CharField(max_length=255, null=True)
+    product_id = fields.CharField(max_length=255, null=True)
+    variant_id = fields.CharField(max_length=255, null=True)
+    title = fields.CharField(max_length=512, null=True)
+    quantity = fields.IntField(default=1)
+    unit_price = fields.FloatField(default=0.0)  # major currency units (e.g. rupees)
+    currency = fields.CharField(max_length=8, default="INR")
+    line_revenue = fields.FloatField(default=0.0)  # unit_price * quantity
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "add_to_cart_events"
+        indexes = [
+            ("store_id",),
+            ("chatbot_id",),
+            ("session_id",),
             ("created_at",),
         ]
 

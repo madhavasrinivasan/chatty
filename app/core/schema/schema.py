@@ -167,7 +167,7 @@ class IntentRoute(BaseModel):
     )
     wants_discounts: Optional[bool] = Field(
         default=False,
-        description="True when the user is explicitly asking about discounts/coupons/offers for this store or for specific products.",
+        description="True when the user asks about discounts, coupons, promo codes, offers, deals, sales, or free shipping / shipping offers for this store or specific products.",
     )
 
 
@@ -227,7 +227,7 @@ class UnifiedRouterOutput(BaseModel):
     )
     wants_discounts: Optional[bool] = Field(
         default=False,
-        description="True when the user is explicitly asking about discounts/coupons/offers.",
+        description="True when the user asks about discounts, coupons, promo codes, offers, deals, sales, or free shipping / shipping offers.",
     )
     # --- Search payload fields (only filled when route is HYBRID_SEARCH) ---
     search_keywords: Optional[str] = Field(
@@ -277,7 +277,11 @@ class IntentToCart(BaseModel):
 class LLMSynthesisOutput(BaseModel):
     """Schema forced on the LLM. Leave lists empty [] when not relevant to the user's query."""
     general_answer: str = Field(
-        description="Answer in Markdown, written as an assumptive sales rep: recommend directly, cite exact prices/discount %/codes, and end with a specific next action or question. Do not mention stock/availability or claim missing access to data provided in context."
+        description=(
+            "Answer in Markdown, written as an assumptive sales rep: recommend directly, cite exact prices/discount %/codes, "
+            "and end with a specific next action or question. Do not mention stock/availability or claim missing access to data provided in context. "
+            "Do not offer to add items to cart yourself; point shoppers to the product card Add to cart button if relevant."
+        )
     )
     urls: List[str] = Field(
         default_factory=list,
@@ -289,7 +293,10 @@ class LLMSynthesisOutput(BaseModel):
     )
     suggested_actions: List[str] = Field(
         default_factory=list,
-        description="2-3 short follow-up questions for the UI."
+        description=(
+            "2-3 short follow-up questions for the UI. "
+            "Never include 'Add to cart' or 'Add … to cart' — cart adds are UI-button only."
+        ),
     )
 
 
@@ -393,8 +400,23 @@ class KnowledgeSummary(BaseModel):
     total_products: int
     total_pages: int
     total_policies: int
+    total_custom: int = 0
     last_synced_at: Optional[str] = None
     sync_status: str
+
+
+class AddToCartTrackRequest(BaseModel):
+    """Widget → backend: record a successful Add to cart click from a product card."""
+
+    product_id: Optional[str] = None
+    variant_id: Optional[str] = None
+    title: Optional[str] = None
+    quantity: int = Field(default=1, ge=1)
+    unit_price: float = Field(default=0.0, ge=0, description="Price in major currency units (e.g. 99.00).")
+    currency: str = Field(default="INR", max_length=8)
+    session_id: Optional[str] = None
+    shop_domain: Optional[str] = None
+
 
 class LiveSessionHandoverRequest(BaseModel):
     needs_human: bool

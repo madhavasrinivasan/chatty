@@ -25,7 +25,18 @@ GEMINI_PRICING: dict[str, dict[str, float]] = {
         "input": 0.075,
         "output": 0.30,
     },
+    "gemini-2.5-flash-lite": {
+        "input": 0.10,
+        "output": 0.40,
+    },
 }
+
+# Approximate USD → INR for admin dashboard display (LLM list prices are in USD).
+USD_TO_INR = 96.55
+
+
+def usd_to_inr(amount_usd: float, rate: float = USD_TO_INR) -> float:
+    return round(float(amount_usd or 0.0) * rate, 4)
 
 _enc = tiktoken.get_encoding("cl100k_base")
 
