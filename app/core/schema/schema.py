@@ -145,6 +145,24 @@ class AddshopifyRequest(BaseModel):
     store_name: str
 
 
+class AddComezRequest(BaseModel):
+    """Register a Comez store (no OAuth — paste JWT + storefront URL)."""
+
+    store_name: str = Field(description="Comez tenant slug, e.g. mystore (sent as storename header).")
+    access_token: str = Field(description="Comez admin/store JWT stored on ecom_store.access_token.")
+    storefront_url: str = Field(
+        description="Public storefront origin for cart, e.g. https://mystore.com (used for /api/cart/add)."
+    )
+    custom_domain: bool = Field(
+        default=False,
+        description="If true, store_name is a custom domain (x-custom-domain: true).",
+    )
+    x_store: Optional[str] = Field(
+        default=None,
+        description="Optional x-store header value; defaults to store_name when omitted.",
+    )
+
+
 class StoreDNA(BaseModel):
     dna_summary: str = Field(description="A concise summary of the store's niche and style.")
     detected_categories: List[str] = Field(

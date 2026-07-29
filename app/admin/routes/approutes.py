@@ -4,7 +4,7 @@ from app.admin.controller.appcontroller import AppController
 from app.core.schema.schemarespone import APIResponse
 from app.core.services.filehandler import FileHandler
 from app.core.schema.schema import (
-    UploadKnowledgeBaseRequest, AddshopifyRequest, OrchestratorRequest,
+    UploadKnowledgeBaseRequest, AddshopifyRequest, AddComezRequest, OrchestratorRequest,
     LoadFirstConvoRequest, LoadFirstConvoResponse,
     ChatbotCustomizationResponse, ChatbotCustomizationUpdate, KnowledgeSummary,
     AddToCartTrackRequest,
@@ -28,6 +28,37 @@ CUSTOMER_EMAIL_HEADER = "chatty-customer-email"
 SHOP_DOMAIN_HEADER = "x-shop-domain"
 CUSTOMER_EMAIL_HEADER_ALT = "x-customer-email"
 CART_TOKEN_HEADER = "x-cart-token"
+
+
+async def _hydrate_comez_cart_from_token(store, cart_token: str | None) -> tuple[list, float | None]:
+    """
+    When store is Comez and cart_token is present, fetch live cart lines from Comez.
+    Returns (cart_items in major currency units, cart_total or None).
+    """
+    if not store or not (cart_token or "").strip():
+        return [], None
+    store_type = str(getattr(store, "store_type", "") or "").lower()
+    if store_type != "comez":
+        return [], None
+    try:
+        from app.core.services.comez_service import ComezService
+
+        result = await ComezService.get_cart_by_token(
+            store_name=(store.store_name or "").strip(),
+            cart_token=cart_token.strip(),
+            access_token=getattr(store, "access_token", None),
+            custom_domain=bool(getattr(store, "custom_domain", False)),
+            x_store=getattr(store, "x_store", None) or (store.store_name or "").strip(),
+        )
+        items = result.get("items") or []
+        total = result.get("cart_total")
+        print(
+            f"🛒 Comez cart hydrate: token={cart_token[:8]}… items={len(items)} total={total}"
+        )
+        return items, total
+    except Exception as e:
+        print(f"⚠️ Comez cart hydrate failed: {e}")
+        return [], None
 
 
 def _message_text_for_llm(m: ChatMessage) -> str:
@@ -273,6 +304,7 @@ async def load_first_convo(
                 store.access_token or "",
                 customer_email,
                 limit=10,
+                store=store,
             ),
         )
 
@@ -292,6 +324,9 @@ async def load_first_convo(
 
     store_dna = (getattr(store, "store_dna", None) or "") if store else ""
 
+    comez_items, comez_total = await _hydrate_comez_cart_from_token(store, cart_token)
+    first_convo_cart_items = comez_items if comez_items else (body.cart_items or [])
+
     greeting, suggested_actions, personalized, context_used = await generate_first_conversation_greeting(
         store_dna=store_dna,
         shop_domain=(store.store_name or "") if store else "",
@@ -304,7 +339,8 @@ async def load_first_convo(
         prefetched_user_facts=user_facts or None,
         prefetched_previous_session_history=previous_session_history or None,
         prefetched_order_history=order_history or None,
-        cart_items=body.cart_items or [],
+        cart_items=first_convo_cart_items,
+        store=store,
     )
 
 
@@ -420,7 +456,14 @@ async def process_orchestrate_chatbot(
             tasks.append(_dummy_prev())
             
         if not order_history:
-            tasks.append(get_order_history_for_context(store.store_name or "", store.access_token or "", customer_email))
+            tasks.append(
+                get_order_history_for_context(
+                    store.store_name or "",
+                    store.access_token or "",
+                    customer_email,
+                    store=store,
+                )
+            )
             need_update = True
         else:
             async def _dummy_orders(): return order_history
@@ -445,23 +488,32 @@ async def process_orchestrate_chatbot(
     _t_context = _time.perf_counter()
     print(f"⏱️ [TIMING] Context loading (chat history + store + user facts + orders): {_t_context - _t_session:.2f}s")
 
-    cart_total = float(body.cart_total) / 100.0 if body.cart_total is not None else 0.0
-    cart_items = []
-    
-    raw_body_items = body.cart_items or []
-    for item in raw_body_items:
-        if isinstance(item, dict):
-            raw_price = item.get("price")
-            price = float(raw_price) / 100.0 if raw_price is not None else 0.0
-            cart_items.append({
-                "id": item.get("id"),
-                "product_id": item.get("product_id"),
-                "title": item.get("title"),
-                "quantity": item.get("quantity"),
-                "price": price,
-            })
-        else:
-            cart_items.append(item)
+    comez_items, comez_total = await _hydrate_comez_cart_from_token(store, cart_token)
+
+    if comez_items:
+        # Comez totals are already in major currency units (not Shopify cents).
+        cart_items = comez_items
+        cart_total = float(comez_total) if comez_total is not None else sum(
+            float(i.get("price") or 0) * int(i.get("quantity") or 0) for i in cart_items
+        )
+    else:
+        cart_total = float(body.cart_total) / 100.0 if body.cart_total is not None else 0.0
+        cart_items = []
+
+        raw_body_items = body.cart_items or []
+        for item in raw_body_items:
+            if isinstance(item, dict):
+                raw_price = item.get("price")
+                price = float(raw_price) / 100.0 if raw_price is not None else 0.0
+                cart_items.append({
+                    "id": item.get("id"),
+                    "product_id": item.get("product_id"),
+                    "title": item.get("title"),
+                    "quantity": item.get("quantity"),
+                    "price": price,
+                })
+            else:
+                cart_items.append(item)
 
     print(f"order history in routes: {order_history}")
     print(f"cart items in routes: {cart_items}")
@@ -528,6 +580,12 @@ async def shopify_callback(request:Request):
 @adminapprouter.post("/addshoppify",response_model=APIResponse)
 async def addshoppify(request:AddshopifyRequest,user:dict = Depends(AppController.validate_user)):
     return await AppController.addshopify(request,user)
+
+
+@adminapprouter.post("/addcomez", response_model=APIResponse)
+async def addcomez(request: AddComezRequest, user: dict = Depends(AppController.validate_user)):
+    """Connect a Comez store (JWT + storefront URL + storename / x-store / custom_domain). No OAuth redirect."""
+    return await AppController.addcomez(request, user)
 
 @adminapprouter.get("/chatbot/customization", response_model=APIResponse)
 async def get_chatbot_customization(user: dict = Depends(AppController.validate_user)):

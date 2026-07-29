@@ -169,10 +169,42 @@ class AdminDbContoller:
             raise ApplicationError.InternalServerError("Cannot create background task")
 
     async def get_pending_background_tasks(self):
+        """
+        Return pending tasks, preferring get_products before query_expander_context
+        so store DNA runs after catalog ingestion when both are queued together.
+        """
         try:
-            return await self.models.background_tasks.filter(
-                status=self.models.background_task_status.pending
-            ).limit(1).all()
+            # Normalize any whitespace-padded statuses left by older schema widths.
+            await self.connection.execute_query(
+                """
+                UPDATE background_tasks
+                SET status = btrim(status::text)
+                WHERE status IS NOT NULL
+                  AND status::text <> btrim(status::text)
+                """
+            )
+            rows = await self.connection.execute_query_dict(
+                """
+                SELECT id
+                FROM background_tasks
+                WHERE btrim(status::text) = 'pending'
+                ORDER BY
+                  CASE
+                    WHEN task_type::text = 'get_products' THEN 0
+                    WHEN task_type::text = 'create_vectors' THEN 1
+                    WHEN task_type::text = 'query_expander_context' THEN 2
+                    ELSE 3
+                  END,
+                  id ASC
+                LIMIT 1
+                """
+            )
+            if not rows:
+                return []
+            ids = [r["id"] for r in rows]
+            tasks = await self.models.background_tasks.filter(id__in=ids).all()
+            by_id = {t.id: t for t in tasks}
+            return [by_id[i] for i in ids if i in by_id]
         except Exception as e:
             print(f"Error getting pending tasks: {e}")
             raise ApplicationError.InternalServerError("Cannot get pending tasks")
@@ -314,12 +346,62 @@ class AdminDbContoller:
             raise ApplicationError.InternalServerError("Cannot update ecom store tokens")
 
 
-    async def create_ecom_store(self, user_id: int, chatbot_id: int, store_id: str, store_name: str, access_token: str, refresh_token: str, expires_at: datetime, store_type: str):
+    async def create_ecom_store(
+        self,
+        user_id: int,
+        chatbot_id: int,
+        store_id: str,
+        store_name: str,
+        access_token: str,
+        refresh_token: str,
+        expires_at: datetime,
+        store_type: str,
+        storefront_url: str | None = None,
+        custom_domain: bool = False,
+        x_store: str | None = None,
+    ):
         try:
-            return await self.models.ecom_store.create(user_id=user_id, chatbot_id=chatbot_id, store_id=store_id, store_name=store_name, access_token=access_token, refresh_token=refresh_token, expires_at=expires_at, store_type=store_type)
+            return await self.models.ecom_store.create(
+                user_id=user_id,
+                chatbot_id=chatbot_id,
+                store_id=store_id,
+                store_name=store_name,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                expires_at=expires_at,
+                store_type=store_type,
+                storefront_url=storefront_url,
+                custom_domain=bool(custom_domain),
+                x_store=x_store or store_name,
+            )
         except Exception as e:
             print(f"Error creating ecom store: {e}")
             raise ApplicationError.InternalServerError("Cannot create ecom store")
+
+    async def update_comez_store_connection(
+        self,
+        *,
+        store_id: int,
+        access_token: str,
+        storefront_url: str,
+        custom_domain: bool,
+        x_store: str | None,
+        store_name: str | None = None,
+    ):
+        try:
+            upd = {
+                "access_token": access_token,
+                "storefront_url": storefront_url,
+                "custom_domain": bool(custom_domain),
+                "x_store": x_store,
+                "store_type": self.models.ecom_store_type.comez,
+            }
+            if store_name:
+                upd["store_name"] = store_name
+            await self.models.ecom_store.filter(id=store_id).update(**upd)
+        except Exception as e:
+            print(f"Error updating Comez store: {e}")
+            raise ApplicationError.InternalServerError("Cannot update Comez store")
 
     async def update_store_dna(self, store_id: int, dna_summary: str):
         """Update the store_dna column for a given ecom_store id."""
@@ -331,15 +413,22 @@ class AdminDbContoller:
 
     async def insert_products_to_database(self, products_list: list, chatbot_id: int):
         """
-        Insert a batch of products into store_knowledge.
-        Uses one parameterized INSERT per row (asyncpg-style $1 placeholders),
-        which avoids SQL injection and type issues while still batching at the
-        application level.
+        Upsert a batch of products into store_knowledge.
+        store_id is the ecom_store.id (resolved from chatbot_id) so DNA / search
+        lookups stay consistent. Re-syncs update existing rows instead of failing
+        on the shopify_product_id unique constraint.
         """
         print(f"Products list: {products_list}")
         try:
             if not products_list:
                 return
+
+            store = await self.find_one_ecom_store(chatbot_id=chatbot_id)
+            if not store:
+                raise ApplicationError.InternalServerError(
+                    f"Cannot find ecom_store for chatbot_id={chatbot_id}"
+                )
+            store_id = int(store.id)
 
             sql = """
             INSERT INTO store_knowledge (
@@ -361,12 +450,35 @@ class AdminDbContoller:
                 $1, $2, $3, $4, $5, $6,
                 $7, $8, $9, $10, $11, $12, $13
             )
+            ON CONFLICT (shopify_product_id) DO UPDATE SET
+                store_id = EXCLUDED.store_id,
+                handle = EXCLUDED.handle,
+                title = EXCLUDED.title,
+                content = EXCLUDED.content,
+                price = EXCLUDED.price,
+                stock = EXCLUDED.stock,
+                image_url = EXCLUDED.image_url,
+                variant_data = EXCLUDED.variant_data,
+                embedding = EXCLUDED.embedding,
+                content_hash = EXCLUDED.content_hash,
+                product_type = EXCLUDED.product_type,
+                data_type = EXCLUDED.data_type
             """
 
             for product in products_list:
+                embedding = product.get("embedding")
+                if not embedding:
+                    embedding = None
+                else:
+                    embedding = json.dumps(list(embedding))
+
+                product_type_val = product.get("product_type", "shopify")
+                if hasattr(product_type_val, "value"):
+                    product_type_val = product_type_val.value
+
                 params = [
                     product.get("shopify_product_id", ""),
-                    int(chatbot_id),
+                    store_id,
                     product.get("handle", ""),
                     product.get("title", ""),
                     product.get("content", ""),
@@ -374,9 +486,9 @@ class AdminDbContoller:
                     product.get("stock", 0),
                     product.get("image_url", ""),
                     json.dumps(product.get("variant_data", {})),
-                    json.dumps(product.get("embedding", [])),
+                    embedding,
                     product.get("content_hash", ""),
-                    product.get("product_type", "shopify"),
+                    product_type_val,
                     product.get("data_type", "product"),
                 ]
                 await self.connection.execute_query(sql, params)

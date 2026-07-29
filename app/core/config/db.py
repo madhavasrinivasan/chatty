@@ -32,10 +32,49 @@ async def init_db():
 
     await _upgrade_chat_sessions_cache()
     await _upgrade_chatbot_customization_fields()
+    await _upgrade_ecom_store_comez_fields()
+    await _upgrade_background_tasks_columns()
 
     if settings.env == "development":
         await Tortoise.generate_schemas(safe=True)
         await _upgrade_store_knowledge_vector_search()
+
+
+async def _upgrade_ecom_store_comez_fields():
+    """Add Comez storefront context columns if missing."""
+    try:
+        conn = connections.get("default")
+        await conn.execute_query("""
+            ALTER TABLE ecom_store
+              ADD COLUMN IF NOT EXISTS storefront_url VARCHAR(512) NULL,
+              ADD COLUMN IF NOT EXISTS custom_domain BOOLEAN NOT NULL DEFAULT FALSE,
+              ADD COLUMN IF NOT EXISTS x_store VARCHAR(255) NULL;
+        """)
+        print("✅ ecom_store upgraded with Comez storefront columns.")
+    except Exception as e:
+        print(f"⚠️ ecom_store Comez fields upgrade skipped or failed: {e}")
+
+
+async def _upgrade_background_tasks_columns():
+    """
+    Ensure background_tasks enum columns are wide enough for current task types/statuses,
+    and normalize any whitespace-padded status values that block the worker.
+    """
+    try:
+        conn = connections.get("default")
+        await conn.execute_query("""
+            ALTER TABLE background_tasks
+              ALTER COLUMN task_type TYPE VARCHAR(64),
+              ALTER COLUMN status TYPE VARCHAR(32);
+        """)
+        await conn.execute_query("""
+            UPDATE background_tasks
+            SET status = btrim(status::text)
+            WHERE status IS NOT NULL AND status::text <> btrim(status::text);
+        """)
+        print("✅ background_tasks task_type/status columns upgraded.")
+    except Exception as e:
+        print(f"⚠️ background_tasks column upgrade skipped or failed: {e}")
 
 
 async def _upgrade_chat_sessions_cache():

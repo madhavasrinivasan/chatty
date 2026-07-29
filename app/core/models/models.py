@@ -285,6 +285,11 @@ class ecom_store(models.Model):
     total_input_tokens = fields.BigIntField(default=0)
     total_output_tokens = fields.BigIntField(default=0)
     total_cost_usd = fields.FloatField(default=0.0)
+    # Comez / multi-platform storefront context
+    storefront_url = fields.CharField(max_length=512, null=True)  # e.g. https://mystore.com — used for /api/cart/add
+    custom_domain = fields.BooleanField(default=False)  # x-custom-domain header
+    x_store = fields.CharField(max_length=255, null=True)  # x-store header (usually same as store_name)
+
     class Meta:
         table = "ecom_store"
         indexes = [

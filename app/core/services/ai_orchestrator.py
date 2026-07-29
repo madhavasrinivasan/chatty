@@ -587,11 +587,21 @@ async def process_user_query(
     previous_session_history: str = "",
     discounts_summary: str = "",
     store_type: str | None = None,
+    store: Any = None,
 ) -> dict[str, Any]:
     """
     Unified flow: single LLM call determines intent AND produces search payload.
     Then branches by route for post-processing.
     """
+    adapter = None
+    if store is not None:
+        try:
+            from app.core.services.commerce import get_commerce_adapter
+
+            adapter = get_commerce_adapter(store)
+        except Exception as e:
+            print(f"commerce adapter init failed: {e}")
+
     # Single unified LLM call (replaces separate IntentRouter + QueryExpander)
     try:
         route_result = await asyncio.to_thread(
@@ -648,7 +658,9 @@ async def process_user_query(
             }
         if store_name and access_token:
             try:
-                if store_type == "comez":
+                if adapter is not None:
+                    order_status = await adapter.get_order_status(order_id)
+                elif store_type == "comez":
                     from app.core.services.comez_service import ComezService
                     order_status = await ComezService.get_order_status(
                         store_name,
@@ -715,10 +727,13 @@ async def process_user_query(
         payload = route_result.get("search_payload") or _default_search_payload(message or "")
 
         discounts: list[dict[str, Any]] = []
-        if wants_discounts and store_name and access_token:
+        if wants_discounts and (adapter is not None or (store_name and access_token)):
             try:
-                from app.core.services.shopify_service import get_active_discounts
-                discounts = await get_active_discounts(store_name, access_token)
+                if adapter is not None:
+                    discounts = await adapter.get_active_discounts()
+                else:
+                    from app.core.services.shopify_service import get_active_discounts
+                    discounts = await get_active_discounts(store_name, access_token)
                 print(f"discounts: {discounts}")
             except Exception:
                 discounts = []

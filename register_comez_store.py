@@ -99,16 +99,25 @@ async def register_store(store_name: str, access_token: str, api_key: str):
             store.chatbot_id = bot.id
             await store.save()
 
-        # 4. Create a background task for product/policy ingestion
-        print("\n⚙️ Queueing product & page sync background task in database...")
+        # 4. Create background tasks: catalog sync first, then store DNA
+        print("\n⚙️ Queueing product sync + store DNA background tasks...")
         task = await background_tasks.create(
             chatbot_id=bot.id,
             user_id=store.id,
             task_type=background_task_type.get_products,
             status=background_task_status.pending,
-            task_data={}
+            task_data={"store_id": store.id},
         )
-        print(f"✅ Created pending background task ID: {task.id}")
+        print(f"✅ Created pending get_products task ID: {task.id}")
+
+        dna_task = await background_tasks.create(
+            chatbot_id=bot.id,
+            user_id=store.id,
+            task_type=background_task_type.query_expander_context,
+            status=background_task_status.pending,
+            task_data={"store_id": store.id},
+        )
+        print(f"✅ Created pending query_expander_context (store DNA) task ID: {dna_task.id}")
 
         print("\n🎉 Success!")
         print(f"   Chatbot API Key : {bot.api_key}")

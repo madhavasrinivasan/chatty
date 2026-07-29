@@ -130,18 +130,32 @@ async def get_order_history_for_context(
     access_token: str,
     customer_email: str,
     limit: int = 20,
+    store: Any = None,
 ) -> str:
-    """Format past orders for this customer as a string for prompts (e.g. 'Order #102: Muslin Jabla 0-3M Elephant')."""
-    if not (customer_email or "").strip() or not shop_domain or not access_token:
+    """Format past orders for this customer as a string for prompts (e.g. 'Order #102: Muslin Jabla 0-3M Elephant').
+
+    Prefer `store` + commerce adapter (Shopify vs Comez). Legacy callers can pass
+    shop_domain/access_token only (Shopify Admin API).
+    """
+    if not (customer_email or "").strip():
         return ""
     try:
-        orders = await asyncio.to_thread(
-            get_orders_by_customer_email,
-            shop_domain,
-            access_token,
-            customer_email,
-            limit=limit,
-        )
+        orders: list[dict[str, Any]] = []
+        if store is not None:
+            from app.core.services.commerce import get_commerce_adapter
+
+            adapter = get_commerce_adapter(store)
+            orders = await adapter.get_orders_by_email(customer_email.strip(), limit=limit)
+        else:
+            if not shop_domain or not access_token:
+                return ""
+            orders = await asyncio.to_thread(
+                get_orders_by_customer_email,
+                shop_domain,
+                access_token,
+                customer_email,
+                limit=limit,
+            )
         lines = []
         print(f"Orders: {orders}")
         for o in orders:

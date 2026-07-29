@@ -106,6 +106,7 @@ async def generate_first_conversation_greeting(
     prefetched_previous_session_history: str | None = None,
     prefetched_order_history: str | None = None,
     cart_items: list[dict[str, Any]] | None = None,
+    store: Any = None,
 ) -> tuple[str, list[str], bool, dict[str, Any]]:
     """
     Returns (general_answer, suggested_actions, personalized, context_used).
@@ -144,16 +145,20 @@ async def generate_first_conversation_greeting(
                 tasks.append(_dummy_prev())
 
             if order_history is None:
-                tasks.append(get_order_history_for_context(shop_domain, access_token, email, limit=10))
+                tasks.append(
+                    get_order_history_for_context(
+                        shop_domain, access_token, email, limit=10, store=store
+                    )
+                )
             else:
                 async def _dummy_orders(): return order_history
                 tasks.append(_dummy_orders())
 
             user_facts, previous_session_history, order_history = await asyncio.gather(*tasks)
-        elif shop_domain and access_token:
+        elif store is not None or (shop_domain and access_token):
             if order_history is None:
                 order_history = await get_order_history_for_context(
-                    shop_domain, access_token, email, limit=10
+                    shop_domain, access_token, email, limit=10, store=store
                 )
 
     context_used["has_user_facts"] = bool((user_facts or "").strip())
