@@ -32,6 +32,103 @@ except Exception:
 MODEL = settings.gemini_synthesis_model or "gemini-2.5-flash-lite"
 
 
+def _results_index(hybrid_results: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Normalize search rows for LLM context + title→id backfill."""
+    out: list[dict[str, Any]] = []
+    for r in hybrid_results or []:
+        if not isinstance(r, dict):
+            continue
+        pid = r.get("id")
+        shopify_pid = r.get("shopify_product_id")
+        title = (r.get("title") or "").strip()
+        if pid is None and not shopify_pid:
+            continue
+        out.append(
+            {
+                "id": str(pid) if pid is not None else None,
+                "shopify_product_id": str(shopify_pid) if shopify_pid else None,
+                "title": title,
+                "content": (r.get("content") or "")[:500],
+                "price": r.get("price"),
+                "url": r.get("url"),
+                "image_url": r.get("image_url"),
+                "discount_info": r.get("discount_info"),
+                "handle": r.get("handle"),
+            }
+        )
+    return out
+
+
+def _backfill_selected_products_from_answer(
+    general_answer: str,
+    selected_products: list[Any],
+    results: list[dict[str, Any]],
+    *,
+    max_products: int = 5,
+) -> list[Any]:
+    """
+    If the model recommends products in prose but left selected_products empty
+    (or incomplete), match titles from search results and fill product cards.
+    """
+    existing: list[Any] = list(selected_products or [])
+    if len(existing) >= max_products or not results:
+        return existing
+
+    already: set[str] = set()
+    for sel in existing:
+        pid = getattr(sel, "product_id", None) or (sel.get("product_id") if isinstance(sel, dict) else None)
+        if pid is not None:
+            already.add(str(pid))
+
+    answer = (general_answer or "").lower()
+    if not answer.strip():
+        return existing
+
+    # Prefer longer titles first so "Organic Muslin Bath Towel | ..." beats "Towel"
+    ranked = sorted(
+        (r for r in results if (r.get("title") or "").strip()),
+        key=lambda r: len(r.get("title") or ""),
+        reverse=True,
+    )
+    for r in ranked:
+        if len(existing) >= max_products:
+            break
+        title = (r.get("title") or "").strip()
+        if len(title) < 6:
+            continue
+        if title.lower() not in answer:
+            continue
+        # Prefer DB id (numeric) for get_variant_data_from_db; fall back to shopify/comez id
+        pid = r.get("id") or r.get("shopify_product_id")
+        if pid is None or str(pid) in already:
+            continue
+        already.add(str(pid))
+        existing.append({"product_id": str(pid), "requested_options": []})
+
+    return existing
+
+
+def _filter_product_image_urls(urls: list[Any], results: list[dict[str, Any]]) -> list[str]:
+    """Drop product CDN/image URLs mistakenly put in `urls` (those belong on cards)."""
+    image_set = {
+        str(r.get("image_url") or "").strip().lower()
+        for r in results
+        if r.get("image_url")
+    }
+    cleaned: list[str] = []
+    for u in urls or []:
+        s = str(u or "").strip()
+        if not s:
+            continue
+        low = s.lower()
+        if low in image_set:
+            continue
+        if any(ext in low for ext in (".png", ".jpg", ".jpeg", ".webp", ".gif")) and "/images/" in low:
+            continue
+        cleaned.append(s)
+    return cleaned
+
+
 async def get_variant_data_from_db(
     product_id: str,
     store_id: int | None = None,
@@ -208,20 +305,22 @@ async def generate_final_response(
     """
     print(f"generate_final_response: {user_query}")
     # Step A: LLM call (single pass) with memory context and full active session
+    indexed = _results_index(hybrid_results)
     context = ""
-    if hybrid_results:
+    if indexed:
         context = json.dumps(
             [
                 {
                     "id": r.get("id"),
+                    "shopify_product_id": r.get("shopify_product_id"),
                     "title": r.get("title"),
-                    "content": (r.get("content") or "")[:500],
+                    "content": r.get("content"),
                     "price": r.get("price"),
                     "url": r.get("url"),
                     "image_url": r.get("image_url"),
                     "discount_info": r.get("discount_info"),
                 }
-                for r in hybrid_results[:20]
+                for r in indexed[:20]
             ],
             indent=2,
             default=str,
@@ -265,7 +364,11 @@ async def generate_final_response(
         "Never offer to add items yourself, never say 'want me to add … to your cart?', and never use suggested_actions "
         "like 'Add X to cart' or 'Add to cart' — those become chat messages and cannot add to cart. "
         "Point shoppers to the card's Add to cart button instead; keep suggested_actions as questions or browse/help asks "
-        "(e.g. 'Show me similar styles', 'Do you have a size guide?', 'What colors does this come in?').\n\n"
+        "(e.g. 'Show me similar styles', 'Do you have a size guide?', 'What colors does this come in?').\n"
+        "9. PRODUCT CARDS ARE MANDATORY WHEN YOU RECOMMEND. If you name, recommend, or quote a price for any product from "
+        "the search results, you MUST include that product in selected_products using the exact `id` field from the results "
+        "(string). Saying 'tap Add to cart on the card below' without selected_products is a bug — the UI will show no card. "
+        "Never put product image_url values into urls; urls is only for policy/sizing/collection page links.\n\n"
     )
     prompt = f"""{instruction}{memory_block}Current user question: "{user_query}".
 
@@ -274,10 +377,9 @@ Search results from our catalog (use these to answer and to pick products):
 
 Output a JSON object with this exact shape. Use empty lists [] when not relevant.
 - general_answer: Markdown answer written as an assumptive sales rep. Recommend directly, cite exact prices/discount %/codes, and end with a specific next action or question. Do NOT mention stock/availability or claim missing access. Do NOT offer to add items to cart yourself — point to the product card button if relevant.
-- urls: List of policy/sizing/collection URLs to show. Empty [] if none.
-- selected_products: List of {{ "product_id": "<id from results>", "requested_options": [] or e.g. ["Black","XL"] }}. Empty [] if not product-related.
+- urls: Policy/sizing/collection page links ONLY. Never product image URLs. Empty [] if none.
+- selected_products: REQUIRED whenever you recommend catalog products. List of {{ "product_id": "<exact id from results above>", "requested_options": [] or e.g. ["Black","XL"] }}. Max 5. Empty [] ONLY if the answer is not about specific products.
 - suggested_actions: 2-3 short follow-up questions or browse asks for the UI (e.g. "See the size guide", "Show similar styles", "What colors are available?"). NEVER include "Add to cart", "Add … to cart", or any phrase that asks the assistant to add a product to the cart.
-- if there is product list and it related always addd to selected_products list , if not related then don't add to selected_products list. the max is 5 products.
 
 Output ONLY valid JSON, no markdown code block."""
 
@@ -300,7 +402,7 @@ Output ONLY valid JSON, no markdown code block."""
         data = json.loads(raw)
         llm_output = LLMSynthesisOutput(
             general_answer=data.get("general_answer", ""),
-            urls=data.get("urls") or [],
+            urls=_filter_product_image_urls(data.get("urls") or [], indexed),
             selected_products=data.get("selected_products") or [],
             suggested_actions=data.get("suggested_actions") or [],
         )
@@ -310,6 +412,21 @@ Output ONLY valid JSON, no markdown code block."""
             urls=[],
             selected_products=[],
             suggested_actions=["What products do you have?", "Do you have a size guide?"],
+        )
+
+    # Hard backfill: prose recommendations without selected_products still get cards.
+    backfilled = _backfill_selected_products_from_answer(
+        llm_output.general_answer,
+        llm_output.selected_products,
+        indexed,
+    )
+    if len(backfilled) != len(llm_output.selected_products or []):
+        print(f"selected_products backfilled: {llm_output.selected_products} -> {backfilled}")
+        llm_output = LLMSynthesisOutput(
+            general_answer=llm_output.general_answer,
+            urls=llm_output.urls,
+            selected_products=backfilled,
+            suggested_actions=llm_output.suggested_actions,
         )
 
     usage_chunk = {

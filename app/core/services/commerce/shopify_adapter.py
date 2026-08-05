@@ -74,7 +74,7 @@ class ShopifyCommerceAdapter(CommerceAdapter):
             "variants": [],
             "attributes": [],
             "raw": None,
-            "message": "Use Chatty catalog / Shopify Admin product APIs separately",
+            "message": "Use Symma catalog / Shopify Admin product APIs separately",
         }
 
     async def get_product_by_id(self, product_id: str | int) -> dict[str, Any]:
@@ -85,5 +85,5 @@ class ShopifyCommerceAdapter(CommerceAdapter):
             "variants": [],
             "attributes": [],
             "raw": None,
-            "message": "Use Chatty catalog / Shopify Admin product APIs separately",
+            "message": "Use Symma catalog / Shopify Admin product APIs separately",
         }

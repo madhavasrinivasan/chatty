@@ -4,7 +4,7 @@ from pydantic import Field
 
 class Settings(BaseSettings):
     # App
-    app_name: str = Field(default="chatty")
+    app_name: str = Field(default="symma")
     env: str = Field(default="development")
     debug: bool = Field(default=False)
 

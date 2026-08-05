@@ -971,6 +971,8 @@ class  AppController:
             previous_session_history=previous_session_history,
             store_type=store.store_type if store else None,
             store=store,
+            store_id=store_id,
+            cart_items=request.cart_items,
         )
         _t2 = _time.perf_counter()
         print(f"  ⏱️ [CTRL] Unified Router+Expander (LLM #1): {_t2 - _t1:.2f}s  |  route={result.get('route')}")
@@ -1094,15 +1096,23 @@ class  AppController:
             result["final_response"] = final.model_dump()
 
         if (
-            result.get("route") == "HYBRID_SEARCH"
-            and result.get("search_payload")
+            result.get("route") in ("HYBRID_SEARCH", "CATALOG_AGENT")
             and store_id is not None
         ):
             try:
                 _t_db_start = _time.perf_counter()
-                rows = await execute_search(store_id=store_id, payload=result["search_payload"])
-                _t_db_end = _time.perf_counter()
-                print(f"  ⏱️ [CTRL] DB Search (execute_search): {_t_db_end - _t_db_start:.2f}s  |  {len(rows)} rows")
+                if result.get("route") == "CATALOG_AGENT" and result.get("search_results") is not None:
+                    rows = result.get("search_results") or []
+                    print(
+                        f"  ⏱️ [CTRL] CATALOG_AGENT tool hits: {_time.perf_counter() - _t_db_start:.2f}s  |  "
+                        f"{len(rows)} rows  |  trace={result.get('tool_trace')}"
+                    )
+                elif result.get("search_payload"):
+                    rows = await execute_search(store_id=store_id, payload=result["search_payload"])
+                    _t_db_end = _time.perf_counter()
+                    print(f"  ⏱️ [CTRL] DB Search (execute_search): {_t_db_end - _t_db_start:.2f}s  |  {len(rows)} rows")
+                else:
+                    rows = []
 
                 # Enrich hybrid search results with discount_info when discounts were requested.
                 discounts = result.get("discounts") or []
@@ -1161,9 +1171,13 @@ class  AppController:
                         active_chat_history=chat_history,
                         cart_items=request.cart_items,
                     )
+                    # If catalog agent also fetched a live order status, attach it
+                    agent_order = result.get("order_status")
+                    if isinstance(agent_order, dict) and agent_order.get("found"):
+                        final.order_status = [agent_order]
                     _t_synth_end = _time.perf_counter()
                     print(f"  ⏱️ [CTRL] Response Synthesis (LLM #2 + variant + inventory): {_t_synth_end - _t_synth_start:.2f}s")
-                    print(f"  ⏱️ [CTRL] HYBRID_SEARCH total: {_t_synth_end - _t2:.2f}s")
+                    print(f"  ⏱️ [CTRL] {result.get('route')} total: {_t_synth_end - _t2:.2f}s")
                     print(f"final: {final}")
                     result["final_response"] = final.model_dump()
                     merged = merge_token_usage_payload(
@@ -1177,7 +1191,7 @@ class  AppController:
                     print(f"Response synthesis error: {syn_err}", flush=True)
                     result["final_response"] = None
             except Exception as e:
-                print(f"Orchestrator execute_search error: {e}", flush=True)
+                print(f"Orchestrator execute_search/catalog_agent error: {e}", flush=True)
                 result["search_results"] = []
 
         try:

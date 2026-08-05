@@ -31,7 +31,16 @@ def _get_client() -> genai.Client:
 MODEL = settings.gemini_router_model or "gemini-2.5-flash-lite"
 
 
-VALID_ROUTES = frozenset({"ORDER_SUPPORT", "GENERAL_CHAT", "FOLLOW_UP_QUESTION", "RETURN_REQUEST", "HYBRID_SEARCH", "GRAPH_SEARCH", "PARALLEL_SEARCH"})
+VALID_ROUTES = frozenset({
+    "ORDER_SUPPORT",
+    "GENERAL_CHAT",
+    "FOLLOW_UP_QUESTION",
+    "RETURN_REQUEST",
+    "HYBRID_SEARCH",
+    "CATALOG_AGENT",
+    "GRAPH_SEARCH",
+    "PARALLEL_SEARCH",
+})
 
 
 def _format_chat_snippet(messages: list, last_n: int) -> str:
@@ -359,10 +368,122 @@ Reply as the Return Specialist. If the user has given their order number (and no
         )
 
 
-def _get_general_chat_response(current_message: str, chat_history: list) -> tuple[str, dict[str, dict[str, int]]]:
-    """Generate a short conversational reply for GENERAL_CHAT (greetings, off-topic)."""
+def _format_past_orders_reply(order_history: str) -> str:
+    """Deterministic reply when we already have past orders and user asks about them."""
+    raw = (order_history or "").strip()
+    if not raw:
+        return (
+            "I don't have any past orders on file for this customer yet. "
+            "Share an order number and I can look that one up."
+        )
+    # order_history is usually "Order #A1: total X Order #A2: total Y ..."
+    parts = [p.strip() for p in raw.replace("Order #", "\nOrder #").split("\n") if p.strip()]
+    if len(parts) <= 1:
+        parts = [raw]
+    lines = [f"- {p}" for p in parts[:10]]
+    body = "\n".join(lines)
+    return (
+        f"Yes — here are the recent orders I have on file:\n{body}\n\n"
+        "Want details or tracking for one of these? Tell me the order number (e.g. A8081)."
+    )
+
+
+def _is_product_recommend_intent(message: str) -> bool:
+    """True when user wants product suggestions (not just a list of past orders)."""
+    text = (message or "").strip().lower()
+    return any(
+        n in text
+        for n in (
+            "should i buy",
+            "could i buy",
+            "what to buy",
+            "buy now",
+            "recommend",
+            "suggest",
+            "suggestion",
+            "best product",
+            "what should i",
+            "what could i",
+            "based on my",
+            "according to",
+            "goes with",
+            "complement",
+            "with my cart",
+            "in my cart",
+        )
+    )
+
+
+def _message_asks_about_past_orders(message: str, chat_history: list | None = None) -> bool:
+    """True when user wants to list/confirm past orders — not product recommendations."""
+    current = (message or "").strip().lower()
+    # "based on my last orders what should I buy?" mentions orders but is a shop request
+    if _is_product_recommend_intent(current):
+        return False
+
+    text = current
+    # Include prior user turn only for short follow-ups like "do u have my orders?"
+    if chat_history and len(current.split()) <= 8:
+        for m in reversed(chat_history[-4:]):
+            if isinstance(m, dict) and (m.get("role") or "").lower() == "user":
+                prev = (m.get("content") or "").strip().lower()
+                if prev and prev != text and not _is_product_recommend_intent(prev):
+                    text = f"{prev} {text}"
+                break
+
+    listish = (
+        "do you have my order",
+        "do u have my order",
+        "do u ahve my order",
+        "show my order",
+        "list my order",
+        "what did i order",
+        "orders on file",
+        "my previous order",
+        "my past order",
+        "my last order",
+        "tell me my order",
+        "see my order",
+        "have my orders",
+        "have my order",
+    )
+    if any(n in text for n in listish):
+        return True
+    # Bare "my orders?" / "previous orders?" without buy/recommend intent
+    if any(n in text for n in ("my orders", "previous orders", "past orders", "last orders")):
+        return not _is_product_recommend_intent(text)
+    return False
+
+
+def _get_general_chat_response(
+    current_message: str,
+    chat_history: list,
+    order_history: str = "",
+) -> tuple[str, dict[str, dict[str, int]]]:
+    """Generate a short conversational reply for GENERAL_CHAT (greetings, off-topic, order list)."""
+    if (order_history or "").strip() and _message_asks_about_past_orders(current_message, chat_history):
+        text = _format_past_orders_reply(order_history)
+        return (
+            text,
+            {
+                "general_chat": {
+                    "input_tokens": estimate_tokens(current_message or ""),
+                    "output_tokens": estimate_tokens(text),
+                }
+            },
+        )
+
+    order_block = ""
+    if (order_history or "").strip():
+        order_block = (
+            f"\nPAST ORDERS ON FILE (use only if the user asks about their orders):\n"
+            f"{order_history.strip()[:1500]}\n"
+            "If they ask whether you have their orders or about a previous order, list these — "
+            "do NOT ask for an order number first.\n"
+        )
+
     prompt = f"""You are a friendly, proactive e-commerce store assistant. The user said: "{current_message}"
-Reply in one or two short sentences: be warm and conversational, and do NOT search for products or orders here.
+{order_block}Reply in one or two short sentences: be warm and conversational, and do NOT search for products here.
 ALWAYS end by offering a concrete next step so the conversation never dead-ends — e.g. "Want me to show today's bestsellers, or look up an order for you?"
 Never claim you can't help or lack access; steer them toward something you can do."""
     try:
@@ -384,6 +505,19 @@ Never claim you can't help or lack access; steer them toward something you can d
             "How can I help you today?",
             {"general_chat": {"input_tokens": estimate_tokens(prompt), "output_tokens": 0}},
         )
+
+
+def _should_upgrade_to_catalog_agent(
+    message: str,
+    order_history: str,
+    cart_items: list | None,
+) -> bool:
+    """Heuristic: personalized buy/recommend with cart or orders → catalog tool loop."""
+    if not _is_product_recommend_intent(message or ""):
+        return False
+    has_orders = bool((order_history or "").strip())
+    has_cart = bool(cart_items)
+    return has_orders or has_cart
 
 
 def _default_search_payload(current_message: str) -> dict[str, Any]:
@@ -437,27 +571,37 @@ The store is on the "{subscription_plan}" plan.
 Store DNA: {store_dna or "A friendly online store."}
 
 {memory_block}{history_snippet}{discounts_block}ROUTING RULES (pick exactly one route):
-1. ORDER_SUPPORT: Use ONLY when the user has already provided an order number (e.g. #1001). Extract it in "extracted_order_number".
-2. GENERAL_CHAT: Simple greetings or small-talk ("hi", "hello", "thanks", "what can you do?").
-3. FOLLOW_UP_QUESTION: User's intent is ambiguous or critical info is missing. Includes: order intent but no order number, product intent but missing size/color/budget. Output a friendly "follow_up_message".
+1. ORDER_SUPPORT: Use ONLY when the user has already provided an order number (e.g. #1001 / A8081). Extract it in "extracted_order_number".
+2. GENERAL_CHAT: Greetings/small-talk ("hi", "thanks", "what can you do?") OR when PAST ORDERS above is non-empty and the user asks whether you have their orders / to list / summarize previous orders (e.g. "do you have my orders?", "tell me about my previous order", "what did I order last?"). In that case do NOT ask for an order number — the system will answer from PAST ORDERS.
+3. FOLLOW_UP_QUESTION: User's intent is ambiguous or critical info is missing (e.g. product search missing size/color/budget). Output a friendly "follow_up_message".
+   IMPORTANT: If PAST ORDERS is present and the user is asking about their orders list / previous orders, do NOT use FOLLOW_UP_QUESTION and do NOT ask for an order number — use GENERAL_CHAT instead.
+   Only ask for an order number when they clearly want live tracking/status of ONE order, gave no number, AND PAST ORDERS is empty. If PAST ORDERS exists, prefer GENERAL_CHAT so we can show the list and ask which one.
 4. RETURN_REQUEST: User mentions returning an item, getting a refund, or exchanging an order.
-5. HYBRID_SEARCH: Product searches, pricing, store policies, shipping, FAQs, "About Us". When you choose this, you MUST also fill in the search payload fields.
-6. GRAPH_SEARCH: Deep technical/manual questions. (Not available on starter/basic plans — use HYBRID_SEARCH instead.)
-7. PARALLEL_SEARCH: Both product + manual needed. (Not available on starter/basic plans — use HYBRID_SEARCH instead.)
+5. HYBRID_SEARCH: Simple product searches, pricing, store policies, shipping, FAQs, "About Us". One search is enough. MUST fill search payload fields.
+6. CATALOG_AGENT: Personalized recommendations that combine cart and/or past orders with catalog discovery — e.g. "based on my last orders what should I buy", "what goes with my cart", "recommend something like my previous order". Fill a seed search payload with specific keywords from cart/orders (not vague "baby products").
+7. GRAPH_SEARCH: Deep technical/manual questions. (Not available on starter/basic plans — use HYBRID_SEARCH instead.)
+8. PARALLEL_SEARCH: Both product + manual needed. (Not available on starter/basic plans — use HYBRID_SEARCH instead.)
 
 PLAN CONSTRAINTS:
-- If plan is "starter" or "basic": NEVER choose GRAPH_SEARCH or PARALLEL_SEARCH. Use HYBRID_SEARCH instead.
+- If plan is "starter" or "basic": NEVER choose GRAPH_SEARCH or PARALLEL_SEARCH. Use HYBRID_SEARCH or CATALOG_AGENT instead.
 
-SEARCH PAYLOAD RULES (only when route is HYBRID_SEARCH):
-- search_keywords: Core product terms. Preserve modifiers/adjectives. For multiple items use " OR ". For exclusions use "-" prefix.
-- semantic_context: Comma-separated abstract concepts/vibes (NEVER leave blank for HYBRID_SEARCH).
+SEARCH PAYLOAD RULES (when route is HYBRID_SEARCH or CATALOG_AGENT):
+- search_keywords: Core product terms. Prefer specifics from cart/orders when personalizing. For multiple items use " OR ". Avoid vague terms like "baby products". For whole-catalog cheapest, use "".
+- semantic_context: Comma-separated vibes. For cheapest/lowest/most expensive price sorts, leave semantic_context EMPTY ("").
 - sort_column: "price" for cheapest/expensive, "rating" for best/top, "created_at" for newest. null otherwise.
-- sort_order: "ASC" or "DESC" matching sort intent. null if no sort.
-- limit: Default 20.
-- filters: {{ "color": string or null, "size": string or null }}
-- rrf_weights: EXACT/SPECIFIC queries → keyword_weight 0.8, vector_weight 0.2. VIBE/ABSTRACT → 0.2/0.8. BALANCED → 0.5/0.5.
+- sort_order: "ASC" (cheapest/lowest) or "DESC" (most expensive/newest). null if no sort.
+- filters.category: ONLY when the user literally names a category word that appears in products (e.g. "towels", "blankets"). NEVER invent generic labels like "apparel", "clothing", "fashion" — put real product words in search_keywords instead (e.g. "muslin OR jabla OR blanket").
+- filters.color / filters.size: only when user asked for a specific color/size.
+- limit: Default 20; use 5 for cheapest/expensive.
+- rrf_weights: EXACT/SPECIFIC → keyword_weight 0.8, vector_weight 0.2. VIBE/ABSTRACT → 0.2/0.8. BALANCED → 0.5/0.5. Price-sort queries can ignore RRF.
 
-For non-HYBRID_SEARCH routes, leave ALL search fields as null.
+Examples:
+- "cheapest product" → keywords "", semantic "", sort_column price, sort_order ASC, limit 5
+- "cheapest towel / muslin" → keywords "towel OR muslin", semantic "", sort price ASC, limit 5
+- "most expensive blanket" → keywords "blanket", semantic "", sort price DESC, limit 5
+- "do you have muslin clothes" → keywords "muslin", semantic "baby muslin clothing", filters.category null
+
+For routes other than HYBRID_SEARCH / CATALOG_AGENT, leave ALL search fields as null.
 
 DISCOUNT DETECTION:
 - Set "wants_discounts" to true whenever the user asks about discounts, coupons, promo/voucher codes, offers, deals, sales, price cuts, OR free shipping / shipping offers / minimum-for-free-shipping (e.g. "any coupons?", "is there free shipping?", "what deals do you have?"). Otherwise false.
@@ -506,15 +650,16 @@ class RouterAndExpander:
                 route = "HYBRID_SEARCH"
                 data["route"] = route
 
-            # Build search_payload dict if HYBRID_SEARCH
+            # Build search_payload dict if HYBRID_SEARCH or CATALOG_AGENT (seed)
             search_payload = None
-            if route == "HYBRID_SEARCH":
+            if route in ("HYBRID_SEARCH", "CATALOG_AGENT"):
                 filters_raw = data.get("filters") or {}
                 if not isinstance(filters_raw, dict):
-                    filters_raw = {"color": None, "size": None}
+                    filters_raw = {"color": None, "size": None, "category": None}
                 else:
                     filters_raw.setdefault("color", None)
                     filters_raw.setdefault("size", None)
+                    filters_raw.setdefault("category", None)
 
                 rrf_raw = data.get("rrf_weights") or {}
                 if not isinstance(rrf_raw, dict):
@@ -588,10 +733,13 @@ async def process_user_query(
     discounts_summary: str = "",
     store_type: str | None = None,
     store: Any = None,
+    store_id: int | None = None,
+    cart_items: list | None = None,
 ) -> dict[str, Any]:
     """
     Unified flow: single LLM call determines intent AND produces search payload.
     Then branches by route for post-processing.
+    CATALOG_AGENT runs a bounded catalog tool loop (Comez + Shopify via shared DB + adapter).
     """
     adapter = None
     if store is not None:
@@ -601,6 +749,9 @@ async def process_user_query(
             adapter = get_commerce_adapter(store)
         except Exception as e:
             print(f"commerce adapter init failed: {e}")
+
+    if store_id is None and store is not None:
+        store_id = getattr(store, "id", None)
 
     # Single unified LLM call (replaces separate IntentRouter + QueryExpander)
     try:
@@ -642,14 +793,44 @@ async def process_user_query(
     elif plan_normalized in ("starter", "basic") and route in ("GRAPH_SEARCH", "PARALLEL_SEARCH"):
         route = "HYBRID_SEARCH"
 
+    # Heuristic upgrade: personalized recommend + cart/orders → catalog agent
+    # (also catches GENERAL_CHAT / FOLLOW_UP / empty ORDER_SUPPORT mis-routes)
+    if _should_upgrade_to_catalog_agent(message or "", order_history or "", cart_items):
+        if route in ("HYBRID_SEARCH", "GENERAL_CHAT", "FOLLOW_UP_QUESTION") or (
+            route == "ORDER_SUPPORT" and not (extracted_order_number or "").strip()
+        ):
+            route = "CATALOG_AGENT"
+            if not route_result.get("search_payload"):
+                route_result["search_payload"] = _default_search_payload(message or "")
+            print("🛒 upgraded → CATALOG_AGENT (personalized catalog)")
+
     def _with_usage(extra: dict[str, dict[str, int]] | None = None) -> dict[str, Any]:
         comps = merge_token_components(router_usage, extra)
         return build_token_usage_payload(comps, MODEL)
+
+    # Safety net: list past orders only when user asked to SEE orders — never for "what should I buy".
+    if (
+        (order_history or "").strip()
+        and _message_asks_about_past_orders(message or "", chat_history)
+        and route not in ("CATALOG_AGENT", "HYBRID_SEARCH", "ORDER_SUPPORT")
+    ):
+        reply = _format_past_orders_reply(order_history or "")
+        return {
+            "route": "GENERAL_CHAT",
+            "conversational_response": reply,
+            "token_usage": _with_usage(),
+        }
 
     # Branch by route
     if route == "ORDER_SUPPORT":
         order_id = (extracted_order_number or "").strip()
         if not order_id:
+            if (order_history or "").strip():
+                return {
+                    "route": "GENERAL_CHAT",
+                    "conversational_response": _format_past_orders_reply(order_history or ""),
+                    "token_usage": _with_usage(),
+                }
             return {
                 "route": "ORDER_SUPPORT",
                 "message": "need orderId",
@@ -694,6 +875,7 @@ async def process_user_query(
             _get_general_chat_response,
             message or "",
             chat_history or [],
+            order_history or "",
         )
         return {
             "route": "GENERAL_CHAT",
@@ -705,6 +887,13 @@ async def process_user_query(
         follow_up = (route_result.get("follow_up_message") or "").strip() if isinstance(route_result, dict) else ""
         if not follow_up:
             follow_up = "Could you tell me a bit more so I can help you better?"
+        # If model still asked for an order number despite having PAST ORDERS, list them instead.
+        if (order_history or "").strip() and "order number" in follow_up.lower():
+            return {
+                "route": "GENERAL_CHAT",
+                "conversational_response": _format_past_orders_reply(order_history or ""),
+                "token_usage": _with_usage(),
+            }
         return {"route": "FOLLOW_UP_QUESTION", "follow_up_message": follow_up, "token_usage": _with_usage()}
 
     if route == "RETURN_REQUEST":
@@ -722,11 +911,52 @@ async def process_user_query(
 
     wants_discounts = bool(route_result.get("wants_discounts")) if isinstance(route_result, dict) else False
 
+    if route == "CATALOG_AGENT":
+        if store_id is None:
+            # No catalog store — degrade to single hybrid search
+            return {
+                "route": "HYBRID_SEARCH",
+                "search_payload": route_result.get("search_payload")
+                or _default_search_payload(message or ""),
+                "discounts": [],
+                "wants_discounts": wants_discounts,
+                "token_usage": _with_usage(),
+            }
+        from app.core.services.catalog_tool_agent import run_catalog_tool_agent
+
+        agent_out = await run_catalog_tool_agent(
+            message=message or "",
+            chat_history=chat_history or [],
+            store_id=int(store_id),
+            store_dna=store_dna or "",
+            user_facts=user_facts or "",
+            order_history=order_history or "",
+            cart_items=cart_items if isinstance(cart_items, list) else None,
+            adapter=adapter,
+            seed_search_payload=route_result.get("search_payload"),
+        )
+        discounts: list[dict[str, Any]] = []
+        if wants_discounts and adapter is not None:
+            try:
+                discounts = await adapter.get_active_discounts()
+            except Exception:
+                discounts = []
+        return {
+            "route": "CATALOG_AGENT",
+            "search_results": agent_out.get("search_results") or [],
+            "search_payload": route_result.get("search_payload"),
+            "order_status": agent_out.get("order_status"),
+            "tool_trace": agent_out.get("tool_trace") or [],
+            "discounts": discounts,
+            "wants_discounts": wants_discounts,
+            "token_usage": _with_usage(agent_out.get("token_usage_components")),
+        }
+
     if route == "HYBRID_SEARCH":
         # Search payload already produced by the unified LLM call
         payload = route_result.get("search_payload") or _default_search_payload(message or "")
 
-        discounts: list[dict[str, Any]] = []
+        discounts = []
         if wants_discounts and (adapter is not None or (store_name and access_token)):
             try:
                 if adapter is not None:

@@ -1,14 +1,14 @@
-# Chatty - AI-Powered E-commerce Chatbot Platform
+# Symma - AI-Powered E-commerce Chatbot Platform
 
 ## Executive Summary
 
-**Chatty** is a next-generation AI chatbot platform specifically designed for e-commerce businesses, with deep Shopify integration. It transforms how online stores interact with customers by providing intelligent, context-aware conversations that drive sales, reduce support costs, and enhance customer satisfaction.
+**Symma** is a next-generation AI chatbot platform specifically designed for e-commerce businesses, with deep Shopify integration. It transforms how online stores interact with customers by providing intelligent, context-aware conversations that drive sales, reduce support costs, and enhance customer satisfaction.
 
-Unlike generic chatbot solutions, Chatty understands your entire store catalog, policies, and customer history to deliver personalized shopping experiences that convert browsers into buyers.
+Unlike generic chatbot solutions, Symma understands your entire store catalog, policies, and customer history to deliver personalized shopping experiences that convert browsers into buyers.
 
 ## 🎯 Core Value Proposition
 
-Chatty helps e-commerce merchants:
+Symma helps e-commerce merchants:
 - **Increase conversion rates** by 30-50% through intelligent product recommendations
 - **Reduce support tickets** by 60% with automated order tracking and policy queries
 - **Boost average order value** with personalized upselling and discount awareness
@@ -185,7 +185,7 @@ The AI orchestrator classifies user intent into 7 specialized routes:
 ## 🚀 Competitive Advantages
 
 ### 1. E-commerce Specialization
-Unlike generic AI chatbots, Chatty is built specifically for e-commerce with deep understanding of product catalogs, shopping behavior, and retail operations.
+Unlike generic AI chatbots, Symma is built specifically for e-commerce with deep understanding of product catalogs, shopping behavior, and retail operations.
 
 ### 2. True Hybrid Search
 Combines vector embeddings for semantic understanding with traditional search for precision, delivering more relevant results than either approach alone.
@@ -206,7 +206,7 @@ Async processing and queue-based workers handle traffic spikes without performan
 
 ### Use Case 1: Baby Products Store
 **Challenge**: Customers overwhelmed by 500+ baby products, high support volume
-**Solution**: Chatty's intelligent product discovery and age-based recommendations
+**Solution**: Symma's intelligent product discovery and age-based recommendations
 **Results**: 45% increase in conversion, 65% reduction in "What product for my baby?" tickets
 
 ### Use Case 2: Fashion Retailer
@@ -332,14 +332,14 @@ Async processing and queue-based workers handle traffic spikes without performan
 
 ### Urgency/Scarcity
 - **"Limited Time: 50% Off First 3 Months"**
-- **"Join 1,000+ Shopify Stores Using Chatty"**
+- **"Join 1,000+ Shopify Stores Using Symma"**
 - **"Free Migration from Your Current Chatbot"**
 
 ## 📱 Visual Elements for Landing Page
 
 ### Hero Section
 - Animated chatbot conversation showing product discovery
-- Split-screen: Confused customer vs. Chatty helping them find the perfect product
+- Split-screen: Confused customer vs. Symma helping them find the perfect product
 - Video demo of real customer interaction
 
 ### Feature Sections

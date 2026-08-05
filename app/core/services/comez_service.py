@@ -487,6 +487,7 @@ class ComezService:
                     json={"email": email, "limit": max(1, min(int(limit or 10), 50))},
                     headers=headers,
                 )
+                print(f"⚠️ Comez get_orders_by_email response: {resp.status_code} {resp.text[:200]}")
             if resp.status_code not in (200, 201):
                 print(f"⚠️ Comez get_orders_by_email failed: {resp.status_code} {resp.text[:200]}")
                 return []
@@ -605,7 +606,7 @@ class ComezService:
 
     @staticmethod
     def _normalize_cart_line(row: dict[str, Any]) -> dict[str, Any]:
-        """Map a Comez Finalcart row into the Chatty cart_items shape (major currency units)."""
+        """Map a Comez Finalcart row into the Symma cart_items shape (major currency units)."""
         qty = row.get("quantity")
         try:
             quantity = int(float(qty)) if qty is not None else 0

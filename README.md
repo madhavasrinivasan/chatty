@@ -1,6 +1,6 @@
-# Chatty Backend
+# Symma Backend
 
-Backend for **Chatty**, an AI-powered e-commerce chatbot platform. It connects to Shopify stores, ingests products and content, and serves an AI orchestrator that routes user intents (order support, general chat, product/search, policies) and runs hybrid search over store knowledge (PostgreSQL + pgvector + full-text search).
+Backend for **Symma**, an AI-powered e-commerce chatbot platform. It connects to Shopify stores, ingests products and content, and serves an AI orchestrator that routes user intents (order support, general chat, product/search, policies) and runs hybrid search over store knowledge (PostgreSQL + pgvector + full-text search).
 
 ## Features
 
@@ -44,7 +44,7 @@ JWT_SECRET=your-secret-key
 JWT_ALGORITHM=HS256
 
 # App
-APP_NAME=chatty
+APP_NAME=symma
 ENV=development
 DEBUG=false
 

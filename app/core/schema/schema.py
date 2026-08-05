@@ -193,6 +193,10 @@ class SearchPayloadFilters(BaseModel):
     """Optional filters for product search."""
     color: Optional[str] = Field(default=None, description="Extracted color filter or null.")
     size: Optional[str] = Field(default=None, description="Extracted size filter or null.")
+    category: Optional[str] = Field(
+        default=None,
+        description="Category / collection theme matched in title or content (e.g. towels, apparel).",
+    )
 
 
 class RRFWeights(BaseModel):
@@ -232,8 +236,23 @@ class SearchPayload(BaseModel):
 class UnifiedRouterOutput(BaseModel):
     """Combined IntentRouter + QueryExpander output for a single LLM call."""
     # --- Routing fields ---
-    route: Literal["ORDER_SUPPORT", "GENERAL_CHAT", "FOLLOW_UP_QUESTION", "RETURN_REQUEST", "HYBRID_SEARCH", "GRAPH_SEARCH", "PARALLEL_SEARCH"] = Field(
-        description="ORDER_SUPPORT: order/tracking/shipping. GENERAL_CHAT: greetings, off-topic. FOLLOW_UP_QUESTION: need clarification. RETURN_REQUEST: return item, refund, or exchange. HYBRID_SEARCH: product search, pricing, policies. GRAPH_SEARCH: manual/PDF. PARALLEL_SEARCH: both product and manual."
+    route: Literal[
+        "ORDER_SUPPORT",
+        "GENERAL_CHAT",
+        "FOLLOW_UP_QUESTION",
+        "RETURN_REQUEST",
+        "HYBRID_SEARCH",
+        "CATALOG_AGENT",
+        "GRAPH_SEARCH",
+        "PARALLEL_SEARCH",
+    ] = Field(
+        description=(
+            "ORDER_SUPPORT: order/tracking when number given. GENERAL_CHAT: greetings or list past orders. "
+            "FOLLOW_UP_QUESTION: need clarification. RETURN_REQUEST: return/refund/exchange. "
+            "HYBRID_SEARCH: simple product/policy search. "
+            "CATALOG_AGENT: personalized multi-hop catalog (recommend from cart+orders, compare, refine search). "
+            "GRAPH_SEARCH: manual/PDF. PARALLEL_SEARCH: product + manual."
+        )
     )
     extracted_order_number: Optional[str] = Field(
         default=None,
@@ -247,14 +266,14 @@ class UnifiedRouterOutput(BaseModel):
         default=False,
         description="True when the user asks about discounts, coupons, promo codes, offers, deals, sales, or free shipping / shipping offers.",
     )
-    # --- Search payload fields (only filled when route is HYBRID_SEARCH) ---
+    # --- Search payload fields (HYBRID_SEARCH + CATALOG_AGENT seed) ---
     search_keywords: Optional[str] = Field(
         default=None,
-        description="Core product search terms. Only fill when route is HYBRID_SEARCH.",
+        description="Core product search terms. Fill when route is HYBRID_SEARCH or CATALOG_AGENT.",
     )
     semantic_context: Optional[str] = Field(
         default=None,
-        description="Semantic/vibe context for vector search. Only fill when route is HYBRID_SEARCH.",
+        description="Semantic/vibe context for vector search. Fill when route is HYBRID_SEARCH or CATALOG_AGENT.",
     )
     sort_column: Optional[Literal["price", "rating", "created_at"]] = Field(
         default=None,

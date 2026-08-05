@@ -1,13 +1,13 @@
-# Chatty Backend — Project Summary
+# Symma Backend — Project Summary
 
-This document describes the **Chatty** backend in detail: purpose, architecture, major components, data concepts, and **every HTTP route** with what it does.  
+This document describes the **Symma** backend in detail: purpose, architecture, major components, data concepts, and **every HTTP route** with what it does.  
 **LightRAG** is intentionally summarized only as “optional RAG layer used in some flows” — not deep internals.
 
 ---
 
 ## 1. What this project is
 
-**Chatty** is a **FastAPI** backend for an **AI-powered e-commerce chatbot** that:
+**Symma** is a **FastAPI** backend for an **AI-powered e-commerce chatbot** that:
 
 - Connects **Shopify** stores via OAuth and Admin APIs.
 - Stores **products, pages, policies, and collections** in PostgreSQL (`store_knowledge`) with **embeddings** (Google Gemini) and **full-text search** (PostgreSQL `tsvector`).
@@ -245,4 +245,4 @@ See `README.md` for an example `.env` block.
 
 ---
 
-*Generated for the Chatty backend codebase. For LightRAG-specific storage and graph behavior, see `app/core/config/db.py` and service modules that call `initialize_light_rag`.*
+*Generated for the Symma backend codebase. For LightRAG-specific storage and graph behavior, see `app/core/config/db.py` and service modules that call `initialize_light_rag`.*
