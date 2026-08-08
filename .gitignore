@@ -14,3 +14,9 @@ shopifyscript.py
 .venv
 .cursor
 updates/
+
+# GCP / local secrets (never commit service-account JSON)
+secrets/
+*.pem
+*-sa.json
+*-credentials.json

@@ -32,7 +32,17 @@ def _build_http_options() -> types.HttpOptions:
 
 
 def configure_gemini_env() -> None:
-    """Env vars used by LightRAG when running in Vertex/ADC mode."""
+    """Env vars used by LightRAG / google-genai ADC when running in Vertex mode."""
+    creds = (settings.google_application_credentials or "").strip()
+    if creds:
+        # Resolve relative paths from the backend working directory.
+        path = os.path.abspath(creds)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f"GOOGLE_APPLICATION_CREDENTIALS file not found: {path}"
+            )
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
+
     if settings.gemini_use_vertexai:
         os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
         os.environ["GOOGLE_CLOUD_PROJECT"] = settings.gemini_project

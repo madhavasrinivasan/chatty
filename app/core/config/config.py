@@ -34,11 +34,13 @@ class Settings(BaseSettings):
     lightrag_graph_storage: str = Field(default="PGGraphStorage")
     lightrag_vector_storage: str = Field(default="PGVectorStorage")
 
-    # Google GenAI — API key OR Vertex AI via ~/.config/gcloud/application_default_credentials.json
+    # Google GenAI — API key OR Vertex AI via service-account JSON / ADC
     gemini_api_key: str = Field(default="")
     gemini_use_vertexai: bool = Field(default=False)
     gemini_project: str = Field(default="")
     gemini_location: str = Field(default="us-central1")
+    # Path to GCP service-account JSON (sets GOOGLE_APPLICATION_CREDENTIALS for ADC)
+    google_application_credentials: str = Field(default="")
     # Per-request hard timeout (ms) so a hung Gemini call can't stall the whole request.
     # Thinking is OFF (budget 0) so calls are fast; raise this if you enable thinking.
     gemini_timeout_ms: int = Field(default=12000)
