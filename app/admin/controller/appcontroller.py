@@ -86,8 +86,18 @@ class  AppController:
             print(f"User: {user}")
             if not user or user is None:
                 raise ApplicationError.Unauthorized("Cannot Find User")
+
+            from app.core.services.subscription_service import (
+                assert_subscription_active,
+                path_is_subscription_allowlisted,
+            )
+
+            if not path_is_subscription_allowlisted(str(request.url.path)):
+                await assert_subscription_active(user["id"])
             
             return user
+        except ApplicationError:
+            raise
         except Exception as e:
             print(f"error validating user: {e}")
             error_message = getattr(e, 'message', str(e))
@@ -122,11 +132,16 @@ class  AppController:
     async def validate_chatbot_api_key(request: Request) -> dict:
         """
         FastAPI dependency: read x-api-key header, decode it, return user-like dict for process_orchestrator_query.
+        Blocks when the merchant subscription is expired.
         """
         api_key = request.headers.get(settings.api_key_header) or request.headers.get("chatty-api-key")
         if not api_key or not api_key.strip():
             raise ApplicationError.Unauthorized("API key not found")
-        return AppController.decode_chatbot_api_key(api_key)
+        user = AppController.decode_chatbot_api_key(api_key)
+        from app.core.services.subscription_service import assert_subscription_active
+
+        await assert_subscription_active(user["id"])
+        return user
 
     
     MAX_CUSTOM_PDF_PAGES = 50

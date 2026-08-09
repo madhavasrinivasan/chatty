@@ -34,10 +34,58 @@ async def init_db():
     await _upgrade_chatbot_customization_fields()
     await _upgrade_ecom_store_comez_fields()
     await _upgrade_background_tasks_columns()
+    await _upgrade_billing_tables()
 
     if settings.env == "development":
         await Tortoise.generate_schemas(safe=True)
         await _upgrade_store_knowledge_vector_search()
+
+
+async def _upgrade_billing_tables():
+    """Create wallets / wallet_transactions / demo_leads if missing (safe for prod)."""
+    try:
+        conn = connections.get("default")
+        await conn.execute_script(
+            """
+            CREATE TABLE IF NOT EXISTS wallets (
+                id           serial PRIMARY KEY,
+                user_id      integer      NOT NULL UNIQUE,
+                balance_inr  numeric(12, 2) NOT NULL DEFAULT 0,
+                currency     varchar(8)   NOT NULL DEFAULT 'INR',
+                updated_at   timestamptz  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_at   timestamptz  NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_wallets_user_id ON wallets (user_id);
+
+            CREATE TABLE IF NOT EXISTS wallet_transactions (
+                id                   serial PRIMARY KEY,
+                user_id              integer        NOT NULL,
+                amount_inr           numeric(12, 2) NOT NULL,
+                source               varchar(16)    NOT NULL DEFAULT 'manual',
+                note                 text,
+                razorpay_payment_id  varchar(128),
+                created_at           timestamptz    NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_wallet_tx_user_id ON wallet_transactions (user_id);
+            CREATE INDEX IF NOT EXISTS idx_wallet_tx_created_at ON wallet_transactions (created_at);
+
+            CREATE TABLE IF NOT EXISTS demo_leads (
+                id         serial PRIMARY KEY,
+                name       varchar(255) NOT NULL,
+                email      varchar(255) NOT NULL,
+                store_url  varchar(512) NOT NULL,
+                platform   varchar(64)  NOT NULL,
+                source     varchar(64)  NOT NULL DEFAULT 'landing',
+                status     varchar(16)  NOT NULL DEFAULT 'new',
+                created_at timestamptz  NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_demo_leads_email ON demo_leads (email);
+            CREATE INDEX IF NOT EXISTS idx_demo_leads_created_at ON demo_leads (created_at);
+            """
+        )
+        print("✅ billing tables ensured (wallets, wallet_transactions, demo_leads)")
+    except Exception as e:
+        print(f"⚠️ billing tables upgrade skipped or failed: {e}")
 
 
 async def _upgrade_ecom_store_comez_fields():

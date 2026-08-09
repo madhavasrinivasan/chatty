@@ -39,6 +39,15 @@ class ApplicationError(Exception):
             message=resourse if resourse else "Forbidden",
             status_code=403
         )
+
+    @classmethod
+    def SubscriptionExpired(cls, resourse: str | None = None):
+        return cls(
+            type="SubscriptionExpired",
+            message=resourse
+            or "Your subscription has ended. Please contact your admin for details.",
+            status_code=403,
+        )
     
     @classmethod
     def NotFound(cls, resourse: str):

@@ -21,14 +21,19 @@ class AuthController:
             check_user = await AdminDbContoller().find_one_user(body.model_dump())
             if check_user:
                 raise ApplicationError.SomethingWentWrong("User already exists")
-            if body.password != body.confirm_password:
+            confirm = body.confirm_password if body.confirm_password is not None else body.password
+            if body.password != confirm:
                 raise ApplicationError.SomethingWentWrong("Password and confirm password do not match")
             
             hashed_password = bcrypt.hashpw(body.password.encode('utf-8'), bcrypt.gensalt())
             user_data = body.model_dump(exclude={"confirm_password"})
            
             user_data["password"] = base64.b64encode(hashed_password).decode('utf-8')
-            data = await AdminDbContoller().create_user(user_data) 
+            data = await AdminDbContoller().create_user(user_data)
+
+            from app.core.services.subscription_service import provision_trial_and_wallet
+
+            trial = await provision_trial_and_wallet(data.id)
 
             new_rag = await Services.get_light_rag_for_store(request=request, store_id=str(data.id))
             if not new_rag:
@@ -40,16 +45,19 @@ class AuthController:
                 "username": data.username,
                 "email": data.email,
                 "address": data.address,
-                "subscription_id": data.subscription_id,
+                "subscription_id": trial.get("subscription_id") or data.subscription_id,
                 "created_at": data.created_at.isoformat() if data.created_at else None,
+                "trial": trial,
             }
             return APIResponse(
                 success=True,
-                message="User created successfully",
+                message=f"User created successfully. 14-day free trial until {trial.get('end_date')}.",
                 data=user_dict
             )
         except Exception as e:
             print(f"error registering user: {e}")
+            if isinstance(e, ApplicationError):
+                raise e
             error_message = getattr(e, 'message', str(e))
             raise ApplicationError.SomethingWentWrong(error_message)
     

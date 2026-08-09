@@ -10,9 +10,16 @@ class RegisterRequest(BaseModel):
     username: str
     email: str 
     password: str
-    confirm_password: str 
+    confirm_password: Optional[str] = None
     address: Optional[str] = None
     subscription_id: Optional[int] = None
+
+
+class DemoLeadRequest(BaseModel):
+    name: str
+    email: str
+    store_url: str
+    platform: str = "Shopify"
 
 
 class LoginRequest(BaseModel):

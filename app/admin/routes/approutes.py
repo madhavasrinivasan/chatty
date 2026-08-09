@@ -7,7 +7,7 @@ from app.core.schema.schema import (
     UploadKnowledgeBaseRequest, AddshopifyRequest, AddComezRequest, OrchestratorRequest,
     LoadFirstConvoRequest, LoadFirstConvoResponse,
     ChatbotCustomizationResponse, ChatbotCustomizationUpdate, KnowledgeSummary,
-    AddToCartTrackRequest,
+    AddToCartTrackRequest, DemoLeadRequest,
 )
 from app.core.schema.schema import llmrequest, llmresponse
 from app.core.services.first_conversation import generate_first_conversation_greeting
@@ -18,6 +18,7 @@ from app.core.services.session_memory import (
 )
 from app.core.models.dbontrollers.admindbcontroller import AdminDbContoller
 from app.core.models.models import ChatSession, ChatMessage
+from app.core.schema.applicationerror import ApplicationError
 from typing import List, Optional
 import uuid as _uuid
 from uuid import UUID
@@ -192,6 +193,77 @@ async def get_user(user: dict = Depends(AppController.validate_user)):
         message="App successful",
         data=user
     )
+
+
+@adminapprouter.get("/billing", response_model=APIResponse)
+async def get_billing(user: dict = Depends(AppController.validate_user)):
+    """Subscription status, wallet balance (INR), and LLM usage totals."""
+    from app.core.services.subscription_service import build_billing_payload
+
+    data = await build_billing_payload(user["id"])
+    return APIResponse(success=True, message="Billing", data=data)
+
+
+@adminapprouter.get("/onboarding-status", response_model=APIResponse)
+async def get_onboarding_status(user: dict = Depends(AppController.validate_user)):
+    from app.core.services.subscription_service import build_onboarding_status
+
+    data = await build_onboarding_status(user["id"])
+    return APIResponse(success=True, message="Onboarding status", data=data)
+
+
+@adminapprouter.post("/public/demo-leads", response_model=APIResponse)
+async def create_demo_lead(body: DemoLeadRequest, http_request: Request):
+    """Public landing-page Book a demo — no JWT. Light per-IP rate limit."""
+    import time
+    from app.core.models.models import demo_leads
+
+    # Simple in-process rate limit: 5 posts / IP / 10 minutes
+    ip = (http_request.client.host if http_request.client else "unknown") or "unknown"
+    now = time.time()
+    bucket = getattr(create_demo_lead, "_rl", None)
+    if bucket is None:
+        bucket = {}
+        create_demo_lead._rl = bucket
+    stamps = [t for t in bucket.get(ip, []) if now - t < 600]
+    if len(stamps) >= 5:
+        raise ApplicationError.BadRequest("Too many demo requests. Please try again later.")
+    stamps.append(now)
+    bucket[ip] = stamps
+
+    lead = await demo_leads.create(
+        name=(body.name or "").strip(),
+        email=(body.email or "").strip().lower(),
+        store_url=(body.store_url or "").strip(),
+        platform=(body.platform or "Shopify").strip(),
+        source="landing",
+    )
+    return APIResponse(
+        success=True,
+        message="Demo request received",
+        data={"id": lead.id, "created_at": lead.created_at.isoformat() if lead.created_at else None},
+    )
+
+
+@adminapprouter.get("/demo-leads", response_model=APIResponse)
+async def list_demo_leads(user: dict = Depends(AppController.validate_user)):
+    """Merchant-visible list is allowlisted while expired so ops can still read; for now all authenticated users."""
+    from app.core.models.models import demo_leads
+
+    rows = await demo_leads.all().order_by("-created_at").limit(100)
+    data = [
+        {
+            "id": r.id,
+            "name": r.name,
+            "email": r.email,
+            "store_url": r.store_url,
+            "platform": r.platform,
+            "status": str(r.status.value if hasattr(r.status, "value") else r.status),
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+    return APIResponse(success=True, message="Demo leads", data=data)
 
 
 @adminapprouter.get("/store-token-usage", response_model=APIResponse)

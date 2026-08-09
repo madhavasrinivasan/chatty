@@ -1,4 +1,5 @@
-from tortoise import models, fields
+from tortoise import fields
+from tortoise.models import Model
 from enum import Enum
 import uuid
 
@@ -61,7 +62,7 @@ class product_type(str, Enum):
     custom = "custom"
 
 
-class users(models.Model):
+class users(Model):
     id = fields.IntField(pk=True)
 
     name = fields.CharField(max_length=100, null=True)
@@ -84,7 +85,7 @@ class users(models.Model):
 
 
 
-class chatbot_settings(models.Model):
+class chatbot_settings(Model):
     id = fields.IntField(pk=True)
 
     user_id = fields.IntField()
@@ -106,7 +107,7 @@ class chatbot_settings(models.Model):
 
 
 
-class user_assets(models.Model):
+class user_assets(Model):
     id = fields.IntField(pk=True)
     asset_type = fields.CharEnumField(asset_type)
     user_id = fields.IntField()
@@ -127,7 +128,7 @@ class user_assets(models.Model):
 # vector_store
 # ============================
 
-# class vector_store(models.Model):
+# class vector_store(Model):
 #     id = fields.BigIntField(pk=True)
 
 #     user_id = fields.IntField()
@@ -152,7 +153,7 @@ class user_assets(models.Model):
 
 
 
-class store_knowledge(models.Model):
+class store_knowledge(Model):
     id = fields.IntField(pk=True)
     data_type = fields.CharEnumField(store_knowledge_data_type) 
     store_id = fields.BigIntField()
@@ -183,7 +184,7 @@ class store_knowledge(models.Model):
 # subscriptions
 # ============================
 
-class subscriptions(models.Model):
+class subscriptions(Model):
     id = fields.IntField(pk=True)
 
     user_id = fields.IntField()
@@ -204,11 +205,73 @@ class subscriptions(models.Model):
         ]
 
 
+class wallet_tx_source(str, Enum):
+    manual = "manual"
+    razorpay = "razorpay"
+    adjustment = "adjustment"
+
+
+class demo_lead_status(str, Enum):
+    new = "new"
+    contacted = "contacted"
+    closed = "closed"
+
+
+class wallets(Model):
+    id = fields.IntField(pk=True)
+    user_id = fields.IntField(unique=True)
+    balance_inr = fields.DecimalField(max_digits=12, decimal_places=2, default=0)
+    currency = fields.CharField(max_length=8, default="INR")
+    updated_at = fields.DatetimeField(auto_now=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "wallets"
+        indexes = [("user_id",)]
+
+
+class wallet_transactions(Model):
+    id = fields.IntField(pk=True)
+    user_id = fields.IntField()
+    amount_inr = fields.DecimalField(max_digits=12, decimal_places=2)
+    source = fields.CharEnumField(wallet_tx_source, default=wallet_tx_source.manual)
+    note = fields.TextField(null=True)
+    razorpay_payment_id = fields.CharField(max_length=128, null=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "wallet_transactions"
+        indexes = [
+            ("user_id",),
+            ("created_at",),
+            ("source",),
+        ]
+
+
+class demo_leads(Model):
+    id = fields.IntField(pk=True)
+    name = fields.CharField(max_length=255)
+    email = fields.CharField(max_length=255)
+    store_url = fields.CharField(max_length=512)
+    platform = fields.CharField(max_length=64)
+    source = fields.CharField(max_length=64, default="landing")
+    status = fields.CharEnumField(demo_lead_status, default=demo_lead_status.new)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "demo_leads"
+        indexes = [
+            ("email",),
+            ("created_at",),
+            ("status",),
+        ]
+
+
 # ============================
 # query_logs
 # ============================
 
-class query_logs(models.Model):
+class query_logs(Model):
     id = fields.BigIntField(pk=True)
 
     ipv4 = fields.CharField(max_length=45)
@@ -227,7 +290,7 @@ class query_logs(models.Model):
 
 
 
-class user_sessions(models.Model):
+class user_sessions(Model):
     id = fields.IntField(pk=True)
 
     user_id = fields.IntField()
@@ -245,7 +308,7 @@ class user_sessions(models.Model):
         ]
 
 
-class background_tasks(models.Model):
+class background_tasks(Model):
     id = fields.IntField(pk=True)
     chatbot_id = fields.BigIntField()
     user_id = fields.IntField()
@@ -266,7 +329,7 @@ class background_tasks(models.Model):
         ] 
 
 
-class ecom_store(models.Model):
+class ecom_store(Model):
     id = fields.IntField(pk=True)
     user_id = fields.IntField()
     chatbot_id = fields.IntField(null=True)
@@ -299,7 +362,7 @@ class ecom_store(models.Model):
         ]
 
 
-class chatbot_customization(models.Model):
+class chatbot_customization(Model):
     id = fields.IntField(pk=True)
     store = fields.OneToOneField("models.ecom_store", related_name="customization", on_delete=fields.CASCADE)
     bot_name = fields.CharField(max_length=255, default="Assistant")
@@ -336,7 +399,7 @@ class chatbot_customization(models.Model):
 # ============================
 
 
-class ChatTranscript(models.Model):
+class ChatTranscript(Model):
     """Stores full chat history per session for dual-memory architecture."""
     session_id = fields.CharField(pk=True, max_length=255)
     store_id = fields.IntField()
@@ -352,7 +415,7 @@ class ChatTranscript(models.Model):
         ]
 
 
-class ChatSession(models.Model):
+class ChatSession(Model):
     """Live chat session (persisted per shop + customer or cart token)."""
 
     id = fields.UUIDField(pk=True, default=uuid.uuid4)
@@ -384,7 +447,7 @@ class ChatSession(models.Model):
         ]
 
 
-class ChatMessage(models.Model):
+class ChatMessage(Model):
     """Single chat message belonging to a ChatSession."""
 
     id = fields.UUIDField(pk=True, default=uuid.uuid4)
@@ -404,7 +467,7 @@ class ChatMessage(models.Model):
         ]
 
 
-class AddToCartEvent(models.Model):
+class AddToCartEvent(Model):
     """Logged when a shopper successfully adds a product to cart from the chat widget."""
 
     id = fields.BigIntField(pk=True)
@@ -431,7 +494,7 @@ class AddToCartEvent(models.Model):
         ]
 
 
-class UserMemorySummary(models.Model):
+class UserMemorySummary(Model):
     """Extracted permanent facts about a user (preferences, sizes, baby details, dislikes)."""
     id = fields.IntField(pk=True)
     user_email = fields.CharField(max_length=255)
@@ -446,7 +509,7 @@ class UserMemorySummary(models.Model):
             ("store_id",),
         ]
 
-class TicketsRaised(models.Model):
+class TicketsRaised(Model):
     id = fields.IntField(pk=True)
     user_id = fields.IntField()
     chatbot_id = fields.IntField()
