@@ -2,9 +2,44 @@ from app.core import models as Models
 from app.core.schema.applicationerror import ApplicationError
 from tortoise import connections
 import datetime
+import time as _time
 from typing import List, Dict
 import uuid
 import json
+
+# ---------------------------------------------------------------------------
+# Lightweight in-memory TTL cache for hot-path lookups (store, subscription).
+# Avoids a DB round-trip per chat request for data that rarely changes.
+# ---------------------------------------------------------------------------
+_CACHE: dict[str, tuple[float, object]] = {}   # key -> (expires_at, value)
+_CACHE_TTL = 300  # 5 minutes
+
+
+def _cache_get(key: str) -> object | None:
+    entry = _CACHE.get(key)
+    if entry is None:
+        return None
+    expires_at, value = entry
+    if _time.monotonic() > expires_at:
+        _CACHE.pop(key, None)
+        return None
+    return value
+
+
+def _cache_set(key: str, value: object, ttl: int = _CACHE_TTL) -> None:
+    _CACHE[key] = (_time.monotonic() + ttl, value)
+
+
+def invalidate_store_cache(chatbot_id: int | None = None, user_id: int | None = None) -> None:
+    """Call after store updates to bust the cache for that store."""
+    keys_to_drop = []
+    if chatbot_id is not None:
+        keys_to_drop.append(f"ecom_store:chatbot:{chatbot_id}")
+    if user_id is not None:
+        keys_to_drop.append(f"ecom_store:user:{user_id}")
+    for k in keys_to_drop:
+        _CACHE.pop(k, None)
+
 
 class AdminDbContoller:
     def __init__(self):
@@ -97,16 +132,23 @@ class AdminDbContoller:
         - "enterprise" if the latest subscription pack is enterprise.
         - "starter" for trial/starter/unknown or if no subscription record exists.
         """
+        cache_key = f"sub_plan:{user_id}"
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
         try:
             sub = await self.models.subscriptions.filter(user_id=user_id).order_by("-created_at").first()
             if not sub:
+                _cache_set(cache_key, "starter")
                 return "starter"
 
             pack = getattr(sub, "pack", None)
             if pack == self.models.subscription_pack.enterprise:
+                _cache_set(cache_key, "enterprise")
                 return "enterprise"
 
             # Treat trial/starter/anything else as starter/basic tier
+            _cache_set(cache_key, "starter")
             return "starter"
         except Exception as e:
             print(f"Error getting subscription plan for user {user_id}: {e}")
@@ -304,16 +346,30 @@ class AdminDbContoller:
 
 
     async def find_one_ecom_store(self, chatbot_id: int):
+        cache_key = f"ecom_store:chatbot:{chatbot_id}"
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
         try:
-            return await self.models.ecom_store.filter(chatbot_id=chatbot_id).first()
+            store = await self.models.ecom_store.filter(chatbot_id=chatbot_id).first()
+            if store is not None:
+                _cache_set(cache_key, store)
+            return store
         except Exception as e:
             print(f"Error finding ecom store: {e}")
             raise ApplicationError.InternalServerError("Cannot find ecom store")
 
     async def find_first_ecom_store_by_user_id(self, user_id: int):
         """Return the first ecom_store for the given user (for default store when chatbot_id is not sent)."""
+        cache_key = f"ecom_store:user:{user_id}"
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
         try:
-            return await self.models.ecom_store.filter(user_id=user_id).first()
+            store = await self.models.ecom_store.filter(user_id=user_id).first()
+            if store is not None:
+                _cache_set(cache_key, store)
+            return store
         except Exception as e:
             print(f"Error finding ecom store by user: {e}")
             return None

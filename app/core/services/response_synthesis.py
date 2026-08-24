@@ -322,7 +322,7 @@ async def generate_final_response(
                 }
                 for r in indexed[:20]
             ],
-            indent=2,
+            separators=(",", ":"),
             default=str,
         )
     memory_block = ""
@@ -338,7 +338,7 @@ async def generate_final_response(
     
     if cart_items:
         try:
-            cart_str = json.dumps([{"title": i.get("title"), "quantity": i.get("quantity"), "price": i.get("price")} for i in cart_items], indent=2)
+            cart_str = json.dumps([{"title": i.get("title"), "quantity": i.get("quantity"), "price": i.get("price")} for i in cart_items], separators=(",", ":"))
             memory_block += f"USER'S CURRENT CART (They have these items in their cart right now):\n{cart_str}\n\n"
         except Exception:
             pass
@@ -393,8 +393,12 @@ Output ONLY valid JSON, no markdown code block."""
             {
                 "response_mime_type": "application/json",
                 "response_json_schema": LLMSynthesisOutput.model_json_schema(),
-                # No max_output_tokens cap: with dynamic thinking (-1) a low cap can be
-                # consumed by thinking and truncate/empty the answer.
+                # With thinking OFF (budget 0) a max_output_tokens cap is safe and
+                # shortens generation time.  If thinking is enabled (-1 or N) remove
+                # this cap because thinking tokens count toward the limit.
+                **({
+                    "max_output_tokens": 800,
+                } if settings.gemini_synthesis_thinking_budget == 0 else {}),
                 "thinking_config": {"thinking_budget": settings.gemini_synthesis_thinking_budget},
             },
         )

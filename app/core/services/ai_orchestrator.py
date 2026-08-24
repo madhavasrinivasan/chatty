@@ -557,7 +557,9 @@ def _build_unified_prompt(
     # Memory context
     memory_block = ""
     if (user_facts or "").strip() or (order_history or "").strip():
-        memory_block = "USER FACTS: " + (user_facts or "").strip() + " | PAST ORDERS: " + (order_history or "").strip()[:1500] + "\n\n"
+        # The router only needs to know IF past orders exist for intent routing,
+        # it doesn't need the full details. Trim to 300 chars to save tokens.
+        memory_block = "USER FACTS: " + (user_facts or "").strip() + " | PAST ORDERS: " + (order_history or "").strip()[:300] + "\n\n"
 
     discounts_block = ""
     if (discounts_summary or "").strip():
