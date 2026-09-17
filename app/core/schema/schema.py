@@ -416,6 +416,7 @@ class ChatbotCustomizationResponse(BaseModel):
     other_color: str
     sample_questions: List[str]
     system_prompt_override: Optional[str] = None
+    extended_thinking: bool = False
     updated_at: Optional[str] = None
 
 class ChatbotCustomizationUpdate(BaseModel):
@@ -438,6 +439,7 @@ class ChatbotCustomizationUpdate(BaseModel):
     other_color: Optional[str] = None
     sample_questions: Optional[List[str]] = None
     system_prompt_override: Optional[str] = None
+    extended_thinking: Optional[bool] = None
 
 
 class KnowledgeSummary(BaseModel):

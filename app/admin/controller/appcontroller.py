@@ -1170,31 +1170,155 @@ class  AppController:
                         row["discount_info"] = row_discounts
 
                 result["search_results"] = rows
-                # LLM synthesis + variant match + inventory check -> FinalFrontendResponse
+                # Jev Noul re-rank: keep top ~8 matching products, drop junk before Gemini.
                 try:
-                    _t_synth_start = _time.perf_counter()
-                    final, synth_usage = await generate_final_response(
-                        user_query=request.message or "",
-                        hybrid_results=rows,
-                        shop_domain=store.store_name if store else "",
-                        db_session=None,
-                        access_token=store.access_token if store else "",
-                        store_id=store_id,
-                        user_facts=user_facts,
-                        order_history=order_history,
-                        previous_session_history=previous_session_history,
-                        active_chat_history=chat_history,
-                        cart_items=request.cart_items,
+                    from app.core.services.jev_rerank import rerank_products_with_jev
+
+                    _t_rr = _time.perf_counter()
+                    rows = await rerank_products_with_jev(
+                        request.message or "",
+                        rows,
                     )
-                    # If catalog agent also fetched a live order status, attach it
-                    agent_order = result.get("order_status")
-                    if isinstance(agent_order, dict) and agent_order.get("found"):
-                        final.order_status = [agent_order]
-                    _t_synth_end = _time.perf_counter()
-                    print(f"  ⏱️ [CTRL] Response Synthesis (LLM #2 + variant + inventory): {_t_synth_end - _t_synth_start:.2f}s")
-                    print(f"  ⏱️ [CTRL] {result.get('route')} total: {_t_synth_end - _t2:.2f}s")
+                    print(
+                        f"  ⏱️ [CTRL] Jev re-rank: {_time.perf_counter() - _t_rr:.2f}s  |  "
+                        f"{len(rows)} rows kept"
+                    )
+                    result["search_results"] = rows
+                except Exception as e:
+                    print(f"  ⚠️ [CTRL] Jev re-rank skipped: {e}", flush=True)
+
+                # LLM synthesis + variant match + inventory check -> FinalFrontendResponse
+                # Optional extended_thinking: Noul quality gate + up to N keyword re-searches.
+                try:
+                    from app.core.services.answer_quality import evaluate_answer_quality
+                    from app.core.services.ai_orchestrator import QueryExpander
+                    from app.core.services.token_tracker import merge_token_usage_payload as _merge_tu
+
+                    extended_thinking = False
+                    try:
+                        custom = await AdminDbContoller().get_chatbot_customization(store_id)
+                        extended_thinking = bool(getattr(custom, "extended_thinking", False))
+                    except Exception:
+                        extended_thinking = False
+
+                    max_retries = int(getattr(settings, "extended_thinking_max_retries", 3) or 3)
+                    synth_budget = (
+                        int(getattr(settings, "gemini_extended_thinking_budget", -1))
+                        if extended_thinking
+                        else None
+                    )
+
+                    payload = result.get("search_payload") or {}
+                    attempt = 0
+                    final = None
+                    synth_usage = None
+                    quality_trace: list[dict] = []
+
+                    while True:
+                        _t_synth_start = _time.perf_counter()
+                        final, synth_usage = await generate_final_response(
+                            user_query=request.message or "",
+                            hybrid_results=rows,
+                            shop_domain=store.store_name if store else "",
+                            db_session=None,
+                            access_token=store.access_token if store else "",
+                            store_id=store_id,
+                            user_facts=user_facts,
+                            order_history=order_history,
+                            previous_session_history=previous_session_history,
+                            active_chat_history=chat_history,
+                            cart_items=request.cart_items,
+                            thinking_budget=synth_budget,
+                        )
+                        agent_order = result.get("order_status")
+                        if isinstance(agent_order, dict) and agent_order.get("found"):
+                            final.order_status = [agent_order]
+                        _t_synth_end = _time.perf_counter()
+                        print(
+                            f"  ⏱️ [CTRL] Response Synthesis attempt={attempt} "
+                            f"(LLM #2 + variant + inventory): {_t_synth_end - _t_synth_start:.2f}s"
+                        )
+
+                        if not extended_thinking:
+                            break
+
+                        quality = await evaluate_answer_quality(
+                            request.message or "",
+                            final,
+                            hybrid_results=rows,
+                        )
+                        quality_trace.append(
+                            {
+                                "attempt": attempt,
+                                "good_enough": quality.good_enough,
+                                "answer_accurate": quality.answer_accurate,
+                                "products_relevant": quality.products_relevant,
+                                "reason": quality.reason,
+                                "product_count": len(final.products or []),
+                            }
+                        )
+                        print(f"  🧠 [EXTENDED] quality={quality}", flush=True)
+
+                        # Success: good enough OR already has 1–2 relevant products (gate inside evaluate)
+                        if quality.good_enough:
+                            break
+                        if attempt >= max_retries:
+                            print(
+                                f"  🧠 [EXTENDED] max retries ({max_retries}) reached — keeping best effort",
+                                flush=True,
+                            )
+                            break
+
+                        # Re-search with different keywords (Gemini expander refine only when extended on)
+                        attempt += 1
+                        prev_kw = ""
+                        if isinstance(payload, dict):
+                            prev_kw = str(payload.get("search_keywords") or "")
+                        prev_titles = [
+                            str(r.get("title") or "").strip()
+                            for r in (rows or [])
+                            if (r.get("title") or "").strip()
+                        ][:8]
+
+                        refined = await asyncio.to_thread(
+                            QueryExpander.expand_refined,
+                            request.message or "",
+                            store_dna or "",
+                            previous_keywords=prev_kw,
+                            previous_titles=prev_titles,
+                            user_facts=user_facts,
+                            order_history=order_history,
+                            chat_history_snippet=chat_history,
+                            attempt=attempt,
+                        )
+                        refine_usage = refined.pop("_usage", None) if isinstance(refined, dict) else None
+                        if refine_usage:
+                            synth_usage = _merge_tu(synth_usage, refine_usage, ORCHESTRATOR_MODEL)
+                        payload = refined
+                        result["search_payload"] = payload
+                        rows = await execute_search(store_id=store_id, payload=payload)
+                        try:
+                            from app.core.services.jev_rerank import rerank_products_with_jev
+
+                            rows = await rerank_products_with_jev(
+                                request.message or "",
+                                rows,
+                            )
+                        except Exception as rr_err:
+                            print(f"  ⚠️ [EXTENDED] re-rank skipped: {rr_err}", flush=True)
+                        result["search_results"] = rows
+                        print(
+                            f"  🧠 [EXTENDED] re-search attempt={attempt} → {len(rows)} rows "
+                            f"kw={payload.get('search_keywords')!r}",
+                            flush=True,
+                        )
+
+                    if quality_trace:
+                        result["extended_thinking_trace"] = quality_trace
+
+                    print(f"  ⏱️ [CTRL] {result.get('route')} total: {_time.perf_counter() - _t2:.2f}s")
                     print(f"final: {final}")
-                    result["final_response"] = final.model_dump()
+                    result["final_response"] = final.model_dump() if final else None
                     merged = merge_token_usage_payload(
                         result.get("token_usage"),
                         synth_usage,
@@ -1689,6 +1813,7 @@ class  AppController:
                 "other_color": custom.other_color,
                 "sample_questions": custom.sample_questions or [],
                 "system_prompt_override": custom.system_prompt_override,
+                "extended_thinking": bool(getattr(custom, "extended_thinking", False)),
                 "updated_at": custom.updated_at.isoformat() if custom.updated_at else None,
             }
         )
@@ -1723,6 +1848,7 @@ class  AppController:
             "other_color": custom.other_color,
             "sample_questions": custom.sample_questions or [],
             "system_prompt_override": custom.system_prompt_override,
+            "extended_thinking": bool(getattr(custom, "extended_thinking", False)),
         }
 
         if store.chatbot_id:
@@ -1753,6 +1879,7 @@ class  AppController:
                 "other_color": custom.other_color,
                 "sample_questions": custom.sample_questions or [],
                 "system_prompt_override": custom.system_prompt_override,
+                "extended_thinking": bool(getattr(custom, "extended_thinking", False)),
                 "updated_at": custom.updated_at.isoformat() if custom.updated_at else None,
             }
         )

@@ -200,6 +200,89 @@ class QueryExpander:
             }
             return fb
 
+    @staticmethod
+    def expand_refined(
+        current_message: str,
+        store_dna: str,
+        *,
+        previous_keywords: str = "",
+        previous_titles: list[str] | None = None,
+        user_facts: str = "",
+        order_history: str = "",
+        chat_history_snippet: list | None = None,
+        discounts_summary: str = "",
+        attempt: int = 1,
+    ) -> dict[str, Any]:
+        """
+        Re-expand search keywords when extended thinking judged the prior hit set weak.
+        Explicitly avoids repeating previous_keywords / similar titles.
+        """
+        avoid = (previous_keywords or "").strip()
+        titles = previous_titles or []
+        title_block = ", ".join(titles[:8]) if titles else "(none)"
+        base = _build_expander_prompt(
+            current_message,
+            store_dna,
+            user_facts=user_facts or "",
+            order_history=order_history or "",
+            chat_history_snippet=chat_history_snippet or [],
+            discounts_summary=discounts_summary or "",
+        )
+        refine = f"""
+REFINEMENT PASS #{attempt}: The previous search was not accurate enough for the customer.
+- DO NOT reuse these keywords: {avoid or "(empty)"}
+- Previous result titles (avoid near-duplicates unless clearly better): {title_block}
+- Produce DIFFERENT, more specific search_keywords and a clearer semantic_context.
+- Prefer synonyms, product-type terms, materials, or alternate phrasings from the user message.
+"""
+        prompt = base + "\n" + refine
+        try:
+            client = _get_client()
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "response_json_schema": SearchPayload.model_json_schema(),
+                    "thinking_config": {"thinking_budget": 0},
+                },
+            )
+            raw = getattr(response, "text", None) or str(response)
+            data = json.loads(raw)
+            if "filters" not in data or not isinstance(data["filters"], dict):
+                data["filters"] = {"color": None, "size": None}
+            else:
+                data["filters"].setdefault("color")
+                data["filters"].setdefault("size")
+            rrf = data.get("rrf_weights")
+            if not isinstance(rrf, dict):
+                data["rrf_weights"] = {"keyword_weight": 0.5, "vector_weight": 0.5}
+            else:
+                kw = float(rrf.get("keyword_weight", 0.5))
+                vw = float(rrf.get("vector_weight", 0.5))
+                total = kw + vw
+                if total <= 0:
+                    kw, vw = 0.5, 0.5
+                else:
+                    kw, vw = kw / total, vw / total
+                data["rrf_weights"] = {"keyword_weight": kw, "vector_weight": vw}
+            data["_usage"] = {
+                "query_expander_refine": {
+                    "input_tokens": estimate_tokens(prompt),
+                    "output_tokens": estimate_tokens(raw),
+                }
+            }
+            return data
+        except Exception:
+            fb = _default_search_payload(current_message)
+            fb["_usage"] = {
+                "query_expander_refine": {
+                    "input_tokens": estimate_tokens(prompt),
+                    "output_tokens": 0,
+                }
+            }
+            return fb
+
 
 def _build_expander_prompt(
     current_message: str,
@@ -507,13 +590,36 @@ Never claim you can't help or lack access; steer them toward something you can d
         )
 
 
+def _is_personalized_catalog_intent(message: str) -> bool:
+    """True only when ask explicitly needs cart/order reasoning (not plain 'suggest X')."""
+    text = (message or "").strip().lower()
+    return any(
+        n in text
+        for n in (
+            "based on my",
+            "according to my",
+            "with my cart",
+            "in my cart",
+            "from my order",
+            "from my last",
+            "like my last",
+            "like my previous",
+            "goes with",
+            "complement",
+            "what should i buy",
+            "what could i buy",
+            "should i buy",
+        )
+    )
+
+
 def _should_upgrade_to_catalog_agent(
     message: str,
     order_history: str,
     cart_items: list | None,
 ) -> bool:
-    """Heuristic: personalized buy/recommend with cart or orders → catalog tool loop."""
-    if not _is_product_recommend_intent(message or ""):
+    """Only escalate to Gemini tool loops for true personalization — not plain product search."""
+    if not _is_personalized_catalog_intent(message or ""):
         return False
     has_orders = bool((order_history or "").strip())
     has_cart = bool(cart_items)
@@ -756,35 +862,78 @@ async def process_user_query(
         store_id = getattr(store, "id", None)
 
     # Single unified LLM call (replaces separate IntentRouter + QueryExpander)
+    # Prefer Jev Choice classifier (~150ms–1s); Gemini only on low confidence / miss.
+    route_result: dict[str, Any] | None = None
     try:
-        route_result = await asyncio.to_thread(
-            RouterAndExpander.route_and_expand,
-            chat_history or [],
-            message or "",
-            subscription_plan or "starter",
-            store_dna or "",
-            user_facts or "",
-            order_history or "",
-            discounts_summary or "",
+        from app.core.services.jev_router import (
+            classify_intent_jev,
+            jev_result_to_route_dict,
+            jev_router_enabled,
         )
-        print(f"unified_route_result: {route_result}")
-    except Exception:
-        route_result = {
-            "route": "HYBRID_SEARCH",
-            "extracted_order_number": None,
-            "wants_discounts": False,
-            "search_payload": _default_search_payload(message or ""),
-            "_usage": {
-                "unified_router": {
-                    "input_tokens": estimate_tokens(message or ""),
-                    "output_tokens": 0,
-                }
-            },
-        }
+
+        if jev_router_enabled():
+            jev = await classify_intent_jev(
+                message or "",
+                chat_history or [],
+                store_dna or "",
+                has_orders=bool((order_history or "").strip()),
+                has_cart=bool(cart_items),
+            )
+            threshold = float(
+                getattr(settings, "jev_router_confidence_threshold", 0.55) or 0.55
+            )
+            if (
+                jev.used_jev
+                and not jev.skipped
+                and jev.confidence >= threshold
+            ):
+                route_result = jev_result_to_route_dict(jev)
+                print(
+                    f"unified_route_result (jev): {route_result.get('route')} "
+                    f"conf={jev.confidence:.2f}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[JEV] falling back to Gemini "
+                    f"(conf={jev.confidence:.2f} thresh={threshold} "
+                    f"skipped={jev.skipped} reason={jev.reason})",
+                    flush=True,
+                )
+    except Exception as e:
+        print(f"[JEV] router unavailable, Gemini fallback: {e}", flush=True)
+
+    if route_result is None:
+        try:
+            route_result = await asyncio.to_thread(
+                RouterAndExpander.route_and_expand,
+                chat_history or [],
+                message or "",
+                subscription_plan or "starter",
+                store_dna or "",
+                user_facts or "",
+                order_history or "",
+                discounts_summary or "",
+            )
+            print(f"unified_route_result: {route_result}")
+        except Exception:
+            route_result = {
+                "route": "HYBRID_SEARCH",
+                "extracted_order_number": None,
+                "wants_discounts": False,
+                "search_payload": _default_search_payload(message or ""),
+                "_usage": {
+                    "unified_router": {
+                        "input_tokens": estimate_tokens(message or ""),
+                        "output_tokens": 0,
+                    }
+                },
+            }
 
     if not isinstance(route_result, dict):
         route_result = {"route": "HYBRID_SEARCH", "extracted_order_number": None, "search_payload": _default_search_payload(message or "")}
     router_usage = route_result.pop("_usage", {})
+    route_result.pop("_jev", None)  # debug metadata only; not needed downstream
 
     route = route_result.get("route") if isinstance(route_result, dict) else None
     extracted_order_number = route_result.get("extracted_order_number") if isinstance(route_result, dict) else None

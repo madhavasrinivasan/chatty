@@ -61,18 +61,6 @@ async def health():
     return {"status": "healthy"}  
 
 
-
-@app.on_event("startup")
-async def startup():
-    await init_db()
-
-    
-@app.on_event("shutdown")
-async def shutdown():
-    await close_db()
-    # close_redis() 
-
-
 @app.get("/api/auth/oauth/callback")
 async def root(request: Request):
     # Shopify hits GET / with ?shop=...&id_token=...; must return JSON, not HTML

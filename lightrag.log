@@ -43306,3 +43306,94 @@ HINT:  No function matches the given name and argument types. You might need to 
 2026-08-09 23:09:23,988 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.
 2026-08-09 23:09:23,989 - lightrag - INFO - HNSW vector index idx_lightrag_vdb_chunks_gemini_embedding_001_768d_hnsw_cosine already exists on table LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
 2026-08-09 23:09:23,990 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.
+2026-09-17 17:27:16,440 - lightrag - INFO - [11] Created new empty graph file: /Users/madhava/Developmemt/chatty_package/chatty_backend/rag/11/11/graph_chunk_entity_relation.graphml
+2026-09-17 17:27:16,441 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-09-17 17:27:16,441 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-09-17 17:27:16,441 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-09-17 17:27:16,441 - lightrag - INFO - PostgreSQL, Retry config: attempts=10, backoff=3.0s, backoff_max=30.0s, pool_close_timeout=5.0s
+2026-09-17 17:27:16,447 - lightrag - INFO - PostgreSQL, VECTOR extension enabled
+2026-09-17 17:27:16,458 - lightrag - INFO - PostgreSQL, Connected to database at localhost:5432/chatty without SSL
+2026-09-17 17:27:16,508 - lightrag - INFO - chunk_id column already exists in LIGHTRAG_LLM_CACHE table
+2026-09-17 17:27:16,508 - lightrag - INFO - cache_type column already exists in LIGHTRAG_LLM_CACHE table
+2026-09-17 17:27:16,508 - lightrag - INFO - queryparam column already exists in LIGHTRAG_LLM_CACHE table
+2026-09-17 17:27:16,508 - lightrag - INFO - mode column does not exist in LIGHTRAG_LLM_CACHE table
+2026-09-17 17:27:16,512 - lightrag - INFO - chunks_list column already exists in LIGHTRAG_DOC_STATUS table
+2026-09-17 17:27:16,514 - lightrag - INFO - llm_cache_list column already exists in LIGHTRAG_DOC_CHUNKS table
+2026-09-17 17:27:16,520 - lightrag - INFO - track_id column already exists in LIGHTRAG_DOC_STATUS table
+2026-09-17 17:27:16,521 - lightrag - INFO - Index on track_id column already exists for LIGHTRAG_DOC_STATUS table
+2026-09-17 17:27:16,523 - lightrag - INFO - metadata column already exists in LIGHTRAG_DOC_STATUS table
+2026-09-17 17:27:16,524 - lightrag - INFO - error_msg column already exists in LIGHTRAG_DOC_STATUS table
+2026-09-17 17:27:16,529 - lightrag - INFO - HNSW vector index idx_lightrag_vdb_entity_gemini_embedding_001_768d_hnsw_cosine already exists on table LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-09-17 17:27:16,532 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.
+2026-09-17 17:27:16,533 - lightrag - INFO - HNSW vector index idx_lightrag_vdb_relation_gemini_embedding_001_768d_hnsw_cosine already exists on table LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-09-17 17:27:16,534 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.
+2026-09-17 17:27:16,535 - lightrag - INFO - HNSW vector index idx_lightrag_vdb_chunks_gemini_embedding_001_768d_hnsw_cosine already exists on table LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-09-17 17:27:16,535 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.
+2026-09-17 17:41:55,676 - lightrag - INFO - [12] Created new empty graph file: /Users/madhava/Developmemt/chatty_package/chatty_backend/rag/12/12/graph_chunk_entity_relation.graphml
+2026-09-17 17:41:55,676 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-09-17 17:41:55,676 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-09-17 17:41:55,676 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-09-17 17:41:55,676 - lightrag - INFO - PostgreSQL, Retry config: attempts=10, backoff=3.0s, backoff_max=30.0s, pool_close_timeout=5.0s
+2026-09-17 17:41:55,682 - lightrag - INFO - PostgreSQL, VECTOR extension enabled
+2026-09-17 17:41:55,693 - lightrag - INFO - PostgreSQL, Connected to database at localhost:5432/chatty without SSL
+2026-09-17 17:41:55,718 - lightrag - INFO - chunk_id column already exists in LIGHTRAG_LLM_CACHE table
+2026-09-17 17:41:55,718 - lightrag - INFO - cache_type column already exists in LIGHTRAG_LLM_CACHE table
+2026-09-17 17:41:55,718 - lightrag - INFO - queryparam column already exists in LIGHTRAG_LLM_CACHE table
+2026-09-17 17:41:55,718 - lightrag - INFO - mode column does not exist in LIGHTRAG_LLM_CACHE table
+2026-09-17 17:41:55,720 - lightrag - INFO - chunks_list column already exists in LIGHTRAG_DOC_STATUS table
+2026-09-17 17:41:55,721 - lightrag - INFO - llm_cache_list column already exists in LIGHTRAG_DOC_CHUNKS table
+2026-09-17 17:41:55,724 - lightrag - INFO - track_id column already exists in LIGHTRAG_DOC_STATUS table
+2026-09-17 17:41:55,725 - lightrag - INFO - Index on track_id column already exists for LIGHTRAG_DOC_STATUS table
+2026-09-17 17:41:55,726 - lightrag - INFO - metadata column already exists in LIGHTRAG_DOC_STATUS table
+2026-09-17 17:41:55,727 - lightrag - INFO - error_msg column already exists in LIGHTRAG_DOC_STATUS table
+2026-09-17 17:41:55,731 - lightrag - INFO - HNSW vector index idx_lightrag_vdb_entity_gemini_embedding_001_768d_hnsw_cosine already exists on table LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-09-17 17:41:55,733 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.
+2026-09-17 17:41:55,734 - lightrag - INFO - HNSW vector index idx_lightrag_vdb_relation_gemini_embedding_001_768d_hnsw_cosine already exists on table LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-09-17 17:41:55,735 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.
+2026-09-17 17:41:55,736 - lightrag - INFO - HNSW vector index idx_lightrag_vdb_chunks_gemini_embedding_001_768d_hnsw_cosine already exists on table LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-09-17 17:41:55,736 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.
+2026-09-17 17:47:45,987 - lightrag - INFO - [13] Created new empty graph file: /Users/madhava/Developmemt/chatty_package/chatty_backend/rag/13/13/graph_chunk_entity_relation.graphml
+2026-09-17 17:47:45,987 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-09-17 17:47:45,987 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-09-17 17:47:45,987 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-09-17 17:47:45,987 - lightrag - INFO - Creating LightRAG instance with workspace='13' while default workspace is set to '12'
+2026-09-17 17:47:46,005 - lightrag - INFO - HNSW vector index idx_lightrag_vdb_entity_gemini_embedding_001_768d_hnsw_cosine already exists on table LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-09-17 17:47:46,010 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.
+2026-09-17 17:47:46,012 - lightrag - INFO - HNSW vector index idx_lightrag_vdb_relation_gemini_embedding_001_768d_hnsw_cosine already exists on table LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-09-17 17:47:46,013 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.
+2026-09-17 17:47:46,016 - lightrag - INFO - HNSW vector index idx_lightrag_vdb_chunks_gemini_embedding_001_768d_hnsw_cosine already exists on table LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-09-17 17:47:46,017 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.
+2026-09-17 18:36:07,302 - lightrag - INFO - [14] Created new empty graph file: /Users/madhava/Developmemt/chatty_package/chatty_backend/rag/14/14/graph_chunk_entity_relation.graphml
+2026-09-17 18:36:07,302 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-09-17 18:36:07,302 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-09-17 18:36:07,302 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-09-17 18:36:07,302 - lightrag - INFO - PostgreSQL, Retry config: attempts=10, backoff=3.0s, backoff_max=30.0s, pool_close_timeout=5.0s
+2026-09-17 18:36:07,308 - lightrag - INFO - PostgreSQL, VECTOR extension enabled
+2026-09-17 18:36:07,318 - lightrag - INFO - PostgreSQL, Connected to database at localhost:5432/chatty without SSL
+2026-09-17 18:36:07,348 - lightrag - INFO - chunk_id column already exists in LIGHTRAG_LLM_CACHE table
+2026-09-17 18:36:07,348 - lightrag - INFO - cache_type column already exists in LIGHTRAG_LLM_CACHE table
+2026-09-17 18:36:07,348 - lightrag - INFO - queryparam column already exists in LIGHTRAG_LLM_CACHE table
+2026-09-17 18:36:07,348 - lightrag - INFO - mode column does not exist in LIGHTRAG_LLM_CACHE table
+2026-09-17 18:36:07,350 - lightrag - INFO - chunks_list column already exists in LIGHTRAG_DOC_STATUS table
+2026-09-17 18:36:07,352 - lightrag - INFO - llm_cache_list column already exists in LIGHTRAG_DOC_CHUNKS table
+2026-09-17 18:36:07,356 - lightrag - INFO - track_id column already exists in LIGHTRAG_DOC_STATUS table
+2026-09-17 18:36:07,357 - lightrag - INFO - Index on track_id column already exists for LIGHTRAG_DOC_STATUS table
+2026-09-17 18:36:07,357 - lightrag - INFO - metadata column already exists in LIGHTRAG_DOC_STATUS table
+2026-09-17 18:36:07,358 - lightrag - INFO - error_msg column already exists in LIGHTRAG_DOC_STATUS table
+2026-09-17 18:36:07,363 - lightrag - INFO - HNSW vector index idx_lightrag_vdb_entity_gemini_embedding_001_768d_hnsw_cosine already exists on table LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-09-17 18:36:07,364 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.
+2026-09-17 18:36:07,365 - lightrag - INFO - HNSW vector index idx_lightrag_vdb_relation_gemini_embedding_001_768d_hnsw_cosine already exists on table LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-09-17 18:36:07,366 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.
+2026-09-17 18:36:07,367 - lightrag - INFO - HNSW vector index idx_lightrag_vdb_chunks_gemini_embedding_001_768d_hnsw_cosine already exists on table LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-09-17 18:36:07,367 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.
+2026-09-17 18:48:40,494 - lightrag - INFO - [15] Created new empty graph file: /Users/madhava/Developmemt/chatty_package/chatty_backend/rag/15/15/graph_chunk_entity_relation.graphml
+2026-09-17 18:48:40,494 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-09-17 18:48:40,494 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-09-17 18:48:40,494 - lightrag - INFO - PostgreSQL table: LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-09-17 18:48:40,494 - lightrag - INFO - Creating LightRAG instance with workspace='15' while default workspace is set to '14'
+2026-09-17 18:48:40,512 - lightrag - INFO - HNSW vector index idx_lightrag_vdb_entity_gemini_embedding_001_768d_hnsw_cosine already exists on table LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d
+2026-09-17 18:48:40,516 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_ENTITY_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.
+2026-09-17 18:48:40,519 - lightrag - INFO - HNSW vector index idx_lightrag_vdb_relation_gemini_embedding_001_768d_hnsw_cosine already exists on table LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d
+2026-09-17 18:48:40,520 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_RELATION_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.
+2026-09-17 18:48:40,523 - lightrag - INFO - HNSW vector index idx_lightrag_vdb_chunks_gemini_embedding_001_768d_hnsw_cosine already exists on table LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d
+2026-09-17 18:48:40,524 - lightrag - WARNING - PostgreSQL: workspace data in table 'LIGHTRAG_VDB_CHUNKS_gemini_embedding_001_768d' is empty. Ensure it is caused by new workspace setup and not an unexpected embedding model change.

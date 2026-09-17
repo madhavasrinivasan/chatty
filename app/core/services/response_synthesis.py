@@ -293,6 +293,7 @@ async def generate_final_response(
     previous_session_history: str = "",
     active_chat_history: list[dict[str, Any]] | None = None,
     cart_items: list[dict[str, Any]] | None = None,
+    thinking_budget: int | None = None,
 ) -> tuple[FinalFrontendResponse, dict[str, dict[str, int]]]:
     """
     Top-to-bottom flow:
@@ -302,25 +303,33 @@ async def generate_final_response(
     D) Concurrent check_shopify_inventory_rest; only in-stock items go to products.
 
     Returns (response, token_usage_chunk) where token_usage_chunk maps "final_response" -> input/output estimates.
+    thinking_budget: override settings.gemini_synthesis_thinking_budget when provided (e.g. extended thinking).
     """
     print(f"generate_final_response: {user_query}")
+    budget = (
+        settings.gemini_synthesis_thinking_budget
+        if thinking_budget is None
+        else int(thinking_budget)
+    )
     # Step A: LLM call (single pass) with memory context and full active session
     indexed = _results_index(hybrid_results)
     context = ""
     if indexed:
+        # Prefer Jev-ranked shortlist (already ≤8); truncate long descriptions to cut tokens.
         context = json.dumps(
             [
                 {
                     "id": r.get("id"),
                     "shopify_product_id": r.get("shopify_product_id"),
                     "title": r.get("title"),
-                    "content": r.get("content"),
+                    "content": ((r.get("content") or "")[:320]),
                     "price": r.get("price"),
                     "url": r.get("url"),
                     "image_url": r.get("image_url"),
                     "discount_info": r.get("discount_info"),
+                    "jev_fit": r.get("jev_fit"),
                 }
-                for r in indexed[:20]
+                for r in indexed[:8]
             ],
             separators=(",", ":"),
             default=str,
@@ -346,6 +355,7 @@ async def generate_final_response(
     instruction = (
         "You are a confident, high-performing sales associate for this store. Use the full context "
         "(active session, past chats, facts, orders, and current cart) to sell like a knowledgeable human rep who is trusted with real store data.\n\n"
+        "Prefer products with higher jev_fit when present; ignore weak matches.\n"
         "TONE & BEHAVIOR RULES (follow all):\n"
         "1. BE ASSUMPTIVE, NOT PERMISSION-SEEKING. Recommend directly and drive toward the sale. "
         "Say 'Here's the X in your size — tap Add to cart on the card if you want it.' NOT 'You might like…' or 'I can look into that.'\n"
@@ -398,8 +408,8 @@ Output ONLY valid JSON, no markdown code block."""
                 # this cap because thinking tokens count toward the limit.
                 **({
                     "max_output_tokens": 800,
-                } if settings.gemini_synthesis_thinking_budget == 0 else {}),
-                "thinking_config": {"thinking_budget": settings.gemini_synthesis_thinking_budget},
+                } if budget == 0 else {}),
+                "thinking_config": {"thinking_budget": budget},
             },
         )
         output_tokens = estimate_tokens(raw or "")

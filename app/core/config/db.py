@@ -141,15 +141,16 @@ async def _upgrade_chat_sessions_cache():
 
 
 async def _upgrade_chatbot_customization_fields():
-    """Add send_button_color and other_color to chatbot_customization table if they do not exist."""
+    """Add send_button_color, other_color, extended_thinking to chatbot_customization if missing."""
     try:
         conn = connections.get("default")
         await conn.execute_query("""
             ALTER TABLE chatbot_customization
             ADD COLUMN IF NOT EXISTS send_button_color VARCHAR(50) DEFAULT '#4F46E5',
-            ADD COLUMN IF NOT EXISTS other_color VARCHAR(50) DEFAULT '#6B7280';
+            ADD COLUMN IF NOT EXISTS other_color VARCHAR(50) DEFAULT '#6B7280',
+            ADD COLUMN IF NOT EXISTS extended_thinking BOOLEAN DEFAULT FALSE;
         """)
-        print("✅ chatbot_customization table upgraded with send_button_color and other_color columns.")
+        print("✅ chatbot_customization table upgraded with send_button_color, other_color, extended_thinking.")
     except Exception as e:
         print(f"⚠️ chatbot_customization upgrade skipped or failed: {e}")
 

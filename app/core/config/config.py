@@ -54,6 +54,24 @@ class Settings(BaseSettings):
     # Both default OFF for lowest latency; bump synthesis to -1 or N for richer answers.
     gemini_router_thinking_budget: int = Field(default=0)
     gemini_synthesis_thinking_budget: int = Field(default=0)
+    # When store extended_thinking is on, synthesis uses this budget (-1 = dynamic).
+    gemini_extended_thinking_budget: int = Field(default=-1)
+
+    # TypeSafe / Jev — Choice intent router + Noul re-rank + Noul quality (extended_thinking)
+    typesafe_api_key: str = Field(default="")
+    typesafe_default_model: str = Field(default="jev-latest")
+    # Fast Choice classifier before Gemini router (falls back to Gemini on low confidence)
+    jev_router_enabled: bool = Field(default=True)
+    jev_router_confidence_threshold: float = Field(default=0.55)
+    # Re-rank DB shortlist with Noul before Gemini synthesis (smaller, better context)
+    jev_rerank_enabled: bool = Field(default=True)
+    jev_rerank_top_k: int = Field(default=8)
+    jev_rerank_max_candidates: int = Field(default=12)
+    jev_rerank_min_noul: float = Field(default=0.25)
+    # Noul probability threshold: answer / product relevance considered good enough
+    extended_thinking_noul_threshold: float = Field(default=0.55)
+    # Max keyword re-search attempts after the first search (total searches <= 1 + this)
+    extended_thinking_max_retries: int = Field(default=3)
 
     # Shopify (for OAuth / token exchange)
     shopify_api_key: str = Field(default="")

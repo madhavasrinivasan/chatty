@@ -8,6 +8,7 @@ from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 from app.core.services.webcrawler import Services
 from fastapi import Request
+import asyncio
 import bcrypt
 import base64 
 import time
@@ -35,9 +36,16 @@ class AuthController:
 
             trial = await provision_trial_and_wallet(data.id)
 
-            new_rag = await Services.get_light_rag_for_store(request=request, store_id=str(data.id))
-            if not new_rag:
-                raise ApplicationError.SomethingWentWrong("Failed to create light rag")
+            # LightRAG init can be slow / hang on Vertex — don't block registration.
+            try:
+                new_rag = await asyncio.wait_for(
+                    Services.get_light_rag_for_store(request=request, store_id=str(data.id)),
+                    timeout=20.0,
+                )
+                if not new_rag:
+                    print(f"warn: LightRAG init returned empty for user {data.id}")
+            except Exception as rag_err:
+                print(f"warn: LightRAG init skipped on register for user {data.id}: {rag_err}")
             
             user_dict = {
                 "id": data.id,
@@ -85,10 +93,7 @@ class AuthController:
                 raise ApplicationError.SomethingWentWrong("Failed to generate token")
 
             if check_session and check_session.status == "active" and check_session != None and check_session.id != 0 and check_session.id != "":
-                destroy_session = await AdminDbContoller().destroy_user_session(check_session.token)
-                print(f"Destroyed user session: {destroy_session}")
-                if not destroy_session or destroy_session == None :
-                    raise ApplicationError.SomethingWentWrong("Failed to destroy user session")
+                await AdminDbContoller().destroy_user_session(check_session.token)
                 user_session = await AdminDbContoller().create_user_session(check_user.id, token, ip)
                 if not user_session or user_session == None or user_session.id == 0 or user_session.id == "":
                     raise ApplicationError.SomethingWentWrong("Failed to create user session") 
@@ -116,13 +121,24 @@ class AuthController:
 
 
     @staticmethod
-    async def logout_user(ip: str):
+    async def logout_user(request: Request):
         try:
-            return await AdminDbContoller().destroy_user_session(ip)
+            token = (request.headers.get("adminauthtoken") or "").strip()
+            if token:
+                await AdminDbContoller().destroy_user_session(token)
+            return APIResponse(
+                success=True,
+                message="Logged out successfully",
+                data=None,
+            )
         except Exception as e:
             print(f"error logging out user: {e}")
-            error_message = getattr(e, 'message', str(e))
-            raise ApplicationError.SomethingWentWrong(error_message)
+            # Still succeed for the client — local token clear is what matters for UX
+            return APIResponse(
+                success=True,
+                message="Logged out successfully",
+                data=None,
+            )
 
 
 

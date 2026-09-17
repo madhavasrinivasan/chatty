@@ -682,6 +682,7 @@ async def update_chatbot_customization(
     other_color: Optional[str] = Form(None),
     sample_questions: Optional[str] = Form(None),
     system_prompt_override: Optional[str] = Form(None),
+    extended_thinking: Optional[str] = Form(None),
     logo_url: Optional[str] = Form(None),
     avatar_url: Optional[str] = Form(None),
     logo_file: Optional[UploadFile] = File(None),
@@ -714,6 +715,13 @@ async def update_chatbot_customization(
     if send_button_color is not None: body_data["send_button_color"] = send_button_color
     if other_color is not None: body_data["other_color"] = other_color
     if system_prompt_override is not None: body_data["system_prompt_override"] = system_prompt_override
+    if extended_thinking is not None:
+        body_data["extended_thinking"] = str(extended_thinking).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
     
     if logo_path:
         body_data["logo_url"] = logo_path

@@ -384,6 +384,8 @@ class chatbot_customization(Model):
     other_color = fields.CharField(max_length=50, default="#6B7280")
     sample_questions = fields.JSONField(default=list)
     system_prompt_override = fields.TextField(null=True)
+    # When True: enable quality Noul checks + up to 3 keyword re-searches for complex product asks.
+    extended_thinking = fields.BooleanField(default=False)
     updated_at = fields.DatetimeField(auto_now=True)
 
 
