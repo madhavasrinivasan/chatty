@@ -63,8 +63,12 @@ class Settings(BaseSettings):
     # Fast Choice classifier before Gemini router (falls back to Gemini on low confidence)
     jev_router_enabled: bool = Field(default=True)
     jev_router_confidence_threshold: float = Field(default=0.55)
-    # Re-rank DB shortlist with Noul before Gemini synthesis (smaller, better context)
-    jev_rerank_enabled: bool = Field(default=True)
+    # Hard cap so a hung TypeSafe call can't stall chat forever.
+    jev_router_timeout_s: float = Field(default=8.0)
+    # Noul threshold: run Gemini QueryExpander after Jev product route
+    jev_needs_expander_threshold: float = Field(default=0.55)
+    # Re-rank DB shortlist with Noul before Gemini synthesis (disabled — latency without gain)
+    jev_rerank_enabled: bool = Field(default=False)
     jev_rerank_top_k: int = Field(default=8)
     jev_rerank_max_candidates: int = Field(default=12)
     jev_rerank_min_noul: float = Field(default=0.25)

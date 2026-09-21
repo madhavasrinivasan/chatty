@@ -165,6 +165,8 @@ class store_knowledge(Model):
     stock = fields.IntField(default=0)
     image_url = fields.TextField(null=True)
     variant_data = fields.JSONField(null=True)
+    # Shopify collection titles for this product (JSONB array). Run ALTER TABLE if missing.
+    collection_handles = fields.JSONField(null=True)
     content_hash = fields.CharField(max_length=32, null=True)
     url = fields.TextField(null=True)
     product_type = fields.CharEnumField(product_type ,null=True)

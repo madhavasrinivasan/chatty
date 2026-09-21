@@ -614,6 +614,9 @@ def transform_shopify_product(raw_json: dict, collection_text: str = "") -> dict
     }
     if collection_text:
         row["collections"] = collection_text
+        # Structured list for SQL collection filter (titles from get_product_collections).
+        handles = [c.strip() for c in collection_text.split(",") if c and c.strip()]
+        row["collection_handles"] = handles
     return row
 
 

@@ -500,11 +500,12 @@ class AdminDbContoller:
                 embedding,
                 content_hash,
                 product_type,
-                data_type
+                data_type,
+                collection_handles
             )
             VALUES (
                 $1, $2, $3, $4, $5, $6,
-                $7, $8, $9, $10, $11, $12, $13
+                $7, $8, $9, $10, $11, $12, $13, $14::jsonb
             )
             ON CONFLICT (shopify_product_id) DO UPDATE SET
                 store_id = EXCLUDED.store_id,
@@ -518,7 +519,8 @@ class AdminDbContoller:
                 embedding = EXCLUDED.embedding,
                 content_hash = EXCLUDED.content_hash,
                 product_type = EXCLUDED.product_type,
-                data_type = EXCLUDED.data_type
+                data_type = EXCLUDED.data_type,
+                collection_handles = EXCLUDED.collection_handles
             """
 
             for product in products_list:
@@ -531,6 +533,16 @@ class AdminDbContoller:
                 product_type_val = product.get("product_type", "shopify")
                 if hasattr(product_type_val, "value"):
                     product_type_val = product_type_val.value
+
+                handles = product.get("collection_handles")
+                if not handles and product.get("collections"):
+                    handles = [
+                        c.strip()
+                        for c in str(product.get("collections") or "").split(",")
+                        if c and c.strip()
+                    ]
+                if not isinstance(handles, list):
+                    handles = []
 
                 params = [
                     product.get("shopify_product_id", ""),
@@ -546,6 +558,7 @@ class AdminDbContoller:
                     product.get("content_hash", ""),
                     product_type_val,
                     product.get("data_type", "product"),
+                    json.dumps(handles),
                 ]
                 await self.connection.execute_query(sql, params)
         except Exception as e:

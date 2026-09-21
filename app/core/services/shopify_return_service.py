@@ -259,6 +259,46 @@ class ShopifyReturnService:
             })
         return result
 
+    async def fetch_returnable_items_for_ui(self, order_name: str) -> list[dict[str, Any]]:
+        """
+        Return UI items based on Shopify returnableFulfillments quantities
+        (not full ordered qty). Merges images from order line items query.
+        Empty list => nothing is returnable on this order.
+        """
+        eligibility = await self.fetch_return_eligibility(order_name, item_title=None)
+        if not eligibility.get("ok"):
+            return []
+        all_returnable = eligibility.get("all_line_items") or []
+        if not all_returnable:
+            return []
+
+        ui_all = await self.fetch_order_line_items_for_ui(order_name)
+        by_id = {(x.get("id") or ""): x for x in ui_all}
+
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for li in all_returnable:
+            line_item_node = li.get("lineItem") or {}
+            lid = (line_item_node.get("id") or "").strip()
+            if not lid or lid in seen:
+                continue
+            seen.add(lid)
+            qty = li.get("quantity") or 0
+            try:
+                qty = int(qty)
+            except (TypeError, ValueError):
+                qty = 0
+            if qty <= 0:
+                continue
+            base = by_id.get(lid) or {}
+            result.append({
+                "id": lid,
+                "title": li.get("title") or base.get("title") or "",
+                "image": base.get("image") or "",
+                "quantity_returnable": qty,
+            })
+        return result
+
     # Map UI reason labels to Shopify ReturnReason enum (2024-04)
     _REASON_MAP = {
         "too small": "SIZE_TOO_SMALL",

@@ -215,16 +215,29 @@ class Services():
 
     @staticmethod
     async def generate_embedding(text: str):
-        response = _get_client().models.embed_content(
-            model="gemini-embedding-001",
-            contents=[text],
-            config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY", output_dimensionality=768)
-        )
-        # response.embeddings is a list of embedding objects; take the first one's values
-        if not response.embeddings:
+        # google-genai embed_content is sync — must not run on the event loop or
+        # one slow/hung embed freezes *all* FastAPI requests (looks like timeouts).
+        def _embed():
+            response = _get_client().models.embed_content(
+                model="gemini-embedding-001",
+                contents=[text],
+                config=types.EmbedContentConfig(
+                    task_type="RETRIEVAL_QUERY", output_dimensionality=768
+                ),
+            )
+            if not response.embeddings:
+                return []
+            emb = response.embeddings[0]
+            return list(emb.values) if hasattr(emb, "values") else []
+
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(_embed), timeout=15.0)
+        except asyncio.TimeoutError:
+            print("generate_embedding timed out after 15s", flush=True)
             return []
-        emb = response.embeddings[0]
-        return list(emb.values) if hasattr(emb, "values") else []
+        except Exception as e:
+            print(f"generate_embedding error: {e}", flush=True)
+            return []
 
     
     @staticmethod
@@ -233,19 +246,26 @@ class Services():
         if not texts:
             return []
 
-        # 2. Send the LIST directly to 'contents'
-        response = _get_client().models.embed_content(
-            model="gemini-embedding-001", # Recommendation: Use 004 (Newer/Better)
-            contents=texts,
-            config=types.EmbedContentConfig(
-                task_type="RETRIEVAL_DOCUMENT", # <--- CORRECT TYPE FOR DB STORAGE
-                output_dimensionality=768
+        def _embed_batch():
+            response = _get_client().models.embed_content(
+                model="gemini-embedding-001",
+                contents=texts,
+                config=types.EmbedContentConfig(
+                    task_type="RETRIEVAL_DOCUMENT",
+                    output_dimensionality=768,
+                ),
             )
-        )
-        
-        
-        return [e.values for e in response.embeddings] 
-    
+            return [e.values for e in (response.embeddings or [])]
+
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(_embed_batch), timeout=60.0)
+        except asyncio.TimeoutError:
+            print("generate_batch_embeddings timed out", flush=True)
+            return []
+        except Exception as e:
+            print(f"generate_batch_embeddings error: {e}", flush=True)
+            return []
+
     @staticmethod
     async def vectiriseproductblob(content_blob_array: list):
         try:

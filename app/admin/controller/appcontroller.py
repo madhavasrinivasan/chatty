@@ -35,7 +35,6 @@ from app.core.services.shopify_service import (
     format_order_support_message,
 )
 from app.core.services.token_tracker import merge_token_usage_payload
-from tortoise.expressions import F
 from app.core.services.shopify_return_service import ShopifyReturnService
 from jose import jwt as jose_jwt
 from jose.exceptions import JWTError
@@ -1063,7 +1062,13 @@ class  AppController:
                         store.store_name or "",
                         store.access_token or "",
                     )
-                    return_ui_items = await return_svc.fetch_order_line_items_for_ui(order_number)
+                    return_ui_items = await return_svc.fetch_returnable_items_for_ui(order_number)
+                    if not return_ui_items:
+                        return_reply = (
+                            (return_reply or "").strip()
+                            + "\n\nI checked this order — there are no returnable items "
+                            "right now (nothing fulfilled/eligible for return yet)."
+                        ).strip()
                 except Exception:
                     return_ui_items = []
                 return_reply = re.sub(
@@ -1170,22 +1175,6 @@ class  AppController:
                         row["discount_info"] = row_discounts
 
                 result["search_results"] = rows
-                # Jev Noul re-rank: keep top ~8 matching products, drop junk before Gemini.
-                try:
-                    from app.core.services.jev_rerank import rerank_products_with_jev
-
-                    _t_rr = _time.perf_counter()
-                    rows = await rerank_products_with_jev(
-                        request.message or "",
-                        rows,
-                    )
-                    print(
-                        f"  ⏱️ [CTRL] Jev re-rank: {_time.perf_counter() - _t_rr:.2f}s  |  "
-                        f"{len(rows)} rows kept"
-                    )
-                    result["search_results"] = rows
-                except Exception as e:
-                    print(f"  ⚠️ [CTRL] Jev re-rank skipped: {e}", flush=True)
 
                 # LLM synthesis + variant match + inventory check -> FinalFrontendResponse
                 # Optional extended_thinking: Noul quality gate + up to N keyword re-searches.
@@ -1297,15 +1286,6 @@ class  AppController:
                         payload = refined
                         result["search_payload"] = payload
                         rows = await execute_search(store_id=store_id, payload=payload)
-                        try:
-                            from app.core.services.jev_rerank import rerank_products_with_jev
-
-                            rows = await rerank_products_with_jev(
-                                request.message or "",
-                                rows,
-                            )
-                        except Exception as rr_err:
-                            print(f"  ⚠️ [EXTENDED] re-rank skipped: {rr_err}", flush=True)
                         result["search_results"] = rows
                         print(
                             f"  🧠 [EXTENDED] re-search attempt={attempt} → {len(rows)} rows "
@@ -1652,11 +1632,18 @@ class  AppController:
         if tin == 0 and tout == 0:
             return
         if store_id:
-            await ecom_store.filter(id=store_id).update(
-                total_input_tokens=F("total_input_tokens") + tin,
-                total_output_tokens=F("total_output_tokens") + tout,
-                total_cost_usd=F("total_cost_usd") + cost,
-            )
+            store = await ecom_store.filter(id=store_id).first()
+            if store:
+                store.total_input_tokens = int(getattr(store, "total_input_tokens", 0) or 0) + tin
+                store.total_output_tokens = int(getattr(store, "total_output_tokens", 0) or 0) + tout
+                store.total_cost_usd = float(getattr(store, "total_cost_usd", 0.0) or 0.0) + cost
+                await store.save(
+                    update_fields=[
+                        "total_input_tokens",
+                        "total_output_tokens",
+                        "total_cost_usd",
+                    ]
+                )
         if session_id:
             from uuid import UUID as _UUID
 
@@ -1664,12 +1651,22 @@ class  AppController:
                 su = _UUID(session_id.strip())
             except Exception:
                 return
-            await ChatSession.filter(id=su).update(
-                input_tokens_total=F("input_tokens_total") + tin,
-                output_tokens_total=F("output_tokens_total") + tout,
-                estimated_cost_usd_total=F("estimated_cost_usd_total") + cost,
-                tokens_used=F("tokens_used") + tin + tout,
-            )
+            sess = await ChatSession.filter(id=su).first()
+            if sess:
+                sess.input_tokens_total = int(getattr(sess, "input_tokens_total", 0) or 0) + tin
+                sess.output_tokens_total = int(getattr(sess, "output_tokens_total", 0) or 0) + tout
+                sess.estimated_cost_usd_total = (
+                    float(getattr(sess, "estimated_cost_usd_total", 0.0) or 0.0) + cost
+                )
+                sess.tokens_used = int(getattr(sess, "tokens_used", 0) or 0) + tin + tout
+                await sess.save(
+                    update_fields=[
+                        "input_tokens_total",
+                        "output_tokens_total",
+                        "estimated_cost_usd_total",
+                        "tokens_used",
+                    ]
+                )
 
     @staticmethod
     async def get_merchant_llm_usage(user: dict) -> APIResponse:

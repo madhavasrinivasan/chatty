@@ -315,7 +315,7 @@ async def generate_final_response(
     indexed = _results_index(hybrid_results)
     context = ""
     if indexed:
-        # Prefer Jev-ranked shortlist (already ≤8); truncate long descriptions to cut tokens.
+        # Truncate long descriptions to cut synthesis tokens.
         context = json.dumps(
             [
                 {
@@ -327,7 +327,6 @@ async def generate_final_response(
                     "url": r.get("url"),
                     "image_url": r.get("image_url"),
                     "discount_info": r.get("discount_info"),
-                    "jev_fit": r.get("jev_fit"),
                 }
                 for r in indexed[:8]
             ],
@@ -355,7 +354,6 @@ async def generate_final_response(
     instruction = (
         "You are a confident, high-performing sales associate for this store. Use the full context "
         "(active session, past chats, facts, orders, and current cart) to sell like a knowledgeable human rep who is trusted with real store data.\n\n"
-        "Prefer products with higher jev_fit when present; ignore weak matches.\n"
         "TONE & BEHAVIOR RULES (follow all):\n"
         "1. BE ASSUMPTIVE, NOT PERMISSION-SEEKING. Recommend directly and drive toward the sale. "
         "Say 'Here's the X in your size — tap Add to cart on the card if you want it.' NOT 'You might like…' or 'I can look into that.'\n"
@@ -397,7 +395,8 @@ Output ONLY valid JSON, no markdown code block."""
     llm_output: LLMSynthesisOutput
     output_tokens = 0
     try:
-        raw = generate_content_text(
+        raw = await asyncio.to_thread(
+            generate_content_text,
             MODEL,
             prompt,
             {

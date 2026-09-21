@@ -164,12 +164,7 @@ class QueryExpander:
             )
             raw = getattr(response, "text", None) or str(response)
             data = json.loads(raw)
-            # Ensure filters dict has color/size if missing
-            if "filters" not in data or not isinstance(data["filters"], dict):
-                data["filters"] = {"color": None, "size": None}
-            else:
-                data["filters"].setdefault("color")
-                data["filters"].setdefault("size")
+            data["filters"] = _normalize_expander_filters(data.get("filters"))
             # Ensure rrf_weights present and sum to 1.0
             rrf = data.get("rrf_weights")
             if not isinstance(rrf, dict):
@@ -183,6 +178,17 @@ class QueryExpander:
                 else:
                     kw, vw = kw / total, vw / total
                 data["rrf_weights"] = {"keyword_weight": kw, "vector_weight": vw}
+            # Budget / price sort → clear semantic so DB uses constrained SQL path
+            filt = data.get("filters") or {}
+            if (
+                filt.get("price_max") is not None
+                or filt.get("price_min") is not None
+                or (data.get("sort_column") or "").lower() == "price"
+            ):
+                data["semantic_context"] = ""
+                if not data.get("sort_column"):
+                    data["sort_column"] = "price"
+                    data["sort_order"] = data.get("sort_order") or "ASC"
             data["_usage"] = {
                 "query_expander": {
                     "input_tokens": estimate_tokens(prompt),
@@ -249,11 +255,7 @@ REFINEMENT PASS #{attempt}: The previous search was not accurate enough for the 
             )
             raw = getattr(response, "text", None) or str(response)
             data = json.loads(raw)
-            if "filters" not in data or not isinstance(data["filters"], dict):
-                data["filters"] = {"color": None, "size": None}
-            else:
-                data["filters"].setdefault("color")
-                data["filters"].setdefault("size")
+            data["filters"] = _normalize_expander_filters(data.get("filters"))
             rrf = data.get("rrf_weights")
             if not isinstance(rrf, dict):
                 data["rrf_weights"] = {"keyword_weight": 0.5, "vector_weight": 0.5}
@@ -266,6 +268,13 @@ REFINEMENT PASS #{attempt}: The previous search was not accurate enough for the 
                 else:
                     kw, vw = kw / total, vw / total
                 data["rrf_weights"] = {"keyword_weight": kw, "vector_weight": vw}
+            filt = data.get("filters") or {}
+            if (
+                filt.get("price_max") is not None
+                or filt.get("price_min") is not None
+                or (data.get("sort_column") or "").lower() == "price"
+            ):
+                data["semantic_context"] = ""
             data["_usage"] = {
                 "query_expander_refine": {
                     "input_tokens": estimate_tokens(prompt),
@@ -282,6 +291,29 @@ REFINEMENT PASS #{attempt}: The previous search was not accurate enough for the 
                 }
             }
             return fb
+
+
+def _normalize_expander_filters(filters_raw: Any) -> dict[str, Any]:
+    """Ensure expander filters include price/collection keys with typed numbers."""
+    if not isinstance(filters_raw, dict):
+        filters_raw = {}
+    out: dict[str, Any] = {
+        "color": filters_raw.get("color"),
+        "size": filters_raw.get("size"),
+        "category": filters_raw.get("category"),
+        "collection": filters_raw.get("collection"),
+        "price_min": None,
+        "price_max": None,
+    }
+    for key in ("price_min", "price_max"):
+        val = filters_raw.get(key)
+        if val is None or val == "":
+            continue
+        try:
+            out[key] = float(val)
+        except (TypeError, ValueError):
+            out[key] = None
+    return out
 
 
 def _build_expander_prompt(
@@ -329,10 +361,17 @@ SORTING RULES:
 - If the user says "newest", "latest" -> sort_column "created_at", sort_order "DESC".
 - Otherwise -> sort_column and sort_order should be null.
 
+PRICE + COLLECTION FILTERS (critical for not missing cheap/in-collection items):
+- "under 200", "below ₹500", "max 999", "less than 300" -> filters.price_max = that number; sort_column "price", sort_order "ASC"; leave semantic_context EMPTY so SQL filters then price-sorts (do not rely on vector top-K).
+- "over 500", "above 1000" -> filters.price_min = that number.
+- "best sellers", "bestsellers", "new arrivals", "from X collection" -> filters.collection = short name (e.g. "best seller"); keep product nouns in search_keywords.
+- Prefer keyword_weight 0.8 / vector_weight 0.2 for budget and exact product asks.
+
 RRF WEIGHT RULES (must sum to 1.0):
-- EXACT/SPECIFIC (keyword_weight: 0.8, vector_weight: 0.2): Use this if the user names specific nouns, designs, animals, exact models, MULTIPLE distinct products, or uses EXCLUSIONS.
+- EXACT/SPECIFIC (keyword_weight: 0.8, vector_weight: 0.2): Use this if the user names specific nouns, designs, animals, exact models, MULTIPLE distinct products, budget caps, or uses EXCLUSIONS.
 - VIBE/ABSTRACT (keyword_weight: 0.2, vector_weight: 0.8): Use this ONLY for pure vibes, aesthetics, or conceptual queries.
 - BALANCED (keyword_weight: 0.5, vector_weight: 0.5): Use this for generic broad categories.
+- POLICY phrase (keyword_weight: 0.6, vector_weight: 0.4): shipping/return policy style asks.
 
 OUTPUT INSTRUCTIONS:
 Output ONLY a raw, valid JSON object. Do not wrap the JSON in markdown code blocks.
@@ -343,7 +382,14 @@ The JSON MUST match this schema:
   "sort_column": "price" | "rating" | "created_at" | null,
   "sort_order": "ASC" | "DESC" | null,
   "limit": 20,
-  "filters": {{"color": "string or null", "size": "string or null"}},
+  "filters": {{
+    "color": "string or null",
+    "size": "string or null",
+    "category": "string or null",
+    "price_min": "number or null",
+    "price_max": "number or null",
+    "collection": "string or null"
+  }},
   "rrf_weights": {{"keyword_weight": float, "vector_weight": float}}
 }}
 - limit is default set to 20
@@ -629,13 +675,30 @@ def _should_upgrade_to_catalog_agent(
 def _default_search_payload(current_message: str) -> dict[str, Any]:
     """Safe fallback when QueryExpander fails."""
     keywords = (current_message or "").strip()[:200] or ""
+    try:
+        from app.core.services.jev_router import (
+            detect_collection_ask,
+            extract_price_bounds,
+        )
+
+        pmin, pmax = extract_price_bounds(current_message or "")
+        collection = detect_collection_ask(current_message or "")
+    except Exception:
+        pmin, pmax, collection = None, None, None
     return {
         "search_keywords": keywords,
         "semantic_context": "",
-        "sort_column": None,
-        "sort_order": None,
+        "sort_column": "price" if pmax is not None else None,
+        "sort_order": "ASC" if pmax is not None else None,
         "limit": 5,
-        "filters": {"color": None, "size": None},
+        "filters": {
+            "color": None,
+            "size": None,
+            "category": None,
+            "price_min": pmin,
+            "price_max": pmax,
+            "collection": collection,
+        },
         "rrf_weights": {"keyword_weight": 0.5, "vector_weight": 0.5},
     }
 
@@ -933,7 +996,8 @@ async def process_user_query(
     if not isinstance(route_result, dict):
         route_result = {"route": "HYBRID_SEARCH", "extracted_order_number": None, "search_payload": _default_search_payload(message or "")}
     router_usage = route_result.pop("_usage", {})
-    route_result.pop("_jev", None)  # debug metadata only; not needed downstream
+    jev_meta = route_result.pop("_jev", None) or {}
+    needs_expander = bool(route_result.pop("needs_expander", False) or jev_meta.get("needs_expander"))
 
     route = route_result.get("route") if isinstance(route_result, dict) else None
     extracted_order_number = route_result.get("extracted_order_number") if isinstance(route_result, dict) else None
@@ -953,7 +1017,69 @@ async def process_user_query(
             route = "CATALOG_AGENT"
             if not route_result.get("search_payload"):
                 route_result["search_payload"] = _default_search_payload(message or "")
+            needs_expander = True  # personalized seed benefits from store-DNA expand
             print("🛒 upgraded → CATALOG_AGENT (personalized catalog)")
+
+    # Gemini QueryExpander builds keywords/filters/RRF (including knowledge scope)
+    if needs_expander and route in ("HYBRID_SEARCH", "CATALOG_AGENT"):
+        seed = route_result.get("search_payload") or {}
+        scope = str(seed.get("search_scope") or jev_meta.get("search_scope") or "products").lower()
+        try:
+            expanded = await asyncio.to_thread(
+                QueryExpander.expand,
+                message or "",
+                store_dna or "",
+                user_facts or "",
+                order_history or "",
+                chat_history or [],
+                discounts_summary or "",
+            )
+            exp_usage = expanded.pop("_usage", None) if isinstance(expanded, dict) else None
+            if exp_usage:
+                router_usage = merge_token_components(router_usage, exp_usage)
+            # Preserve Jev sort / scope when expander leaves them empty
+            jev_sort = str(jev_meta.get("sort") or "none")
+            if jev_sort == "price_asc" and not expanded.get("sort_column"):
+                expanded["sort_column"] = "price"
+                expanded["sort_order"] = "ASC"
+                expanded["semantic_context"] = ""
+            elif jev_sort == "price_desc" and not expanded.get("sort_column"):
+                expanded["sort_column"] = "price"
+                expanded["sort_order"] = "DESC"
+                expanded["semantic_context"] = ""
+            elif jev_sort == "newest" and not expanded.get("sort_column"):
+                expanded["sort_column"] = "created_at"
+                expanded["sort_order"] = "DESC"
+            # Merge hard filters from Jev seed if expander omitted them
+            seed_filt = seed.get("filters") if isinstance(seed.get("filters"), dict) else {}
+            exp_filt = expanded.get("filters") if isinstance(expanded.get("filters"), dict) else {}
+            for key in ("price_min", "price_max", "collection"):
+                if exp_filt.get(key) is None and seed_filt.get(key) is not None:
+                    exp_filt[key] = seed_filt[key]
+            expanded["filters"] = _normalize_expander_filters(exp_filt)
+            if scope in ("knowledge", "pages", "policy", "faq"):
+                expanded["search_scope"] = "knowledge"
+                rrf = expanded.get("rrf_weights") or {}
+                if float(rrf.get("keyword_weight", 0.5)) == 0.5 and float(
+                    rrf.get("vector_weight", 0.5)
+                ) == 0.5:
+                    expanded["rrf_weights"] = {
+                        "keyword_weight": 0.6,
+                        "vector_weight": 0.4,
+                    }
+            else:
+                expanded["search_scope"] = scope if scope in ("products", "all") else "products"
+            route_result["search_payload"] = expanded
+            print(
+                f"[EXPAND] QueryExpander ran → kw={expanded.get('search_keywords')!r} "
+                f"sort={expanded.get('sort_column')}/{expanded.get('sort_order')} "
+                f"filters={expanded.get('filters')} scope={expanded.get('search_scope')}",
+                flush=True,
+            )
+        except Exception as exp_err:
+            print(f"[EXPAND] failed, keeping Jev payload: {exp_err}", flush=True)
+    elif route in ("HYBRID_SEARCH", "CATALOG_AGENT"):
+        print("[EXPAND] skipped — Jev needs_expander=false", flush=True)
 
     def _with_usage(extra: dict[str, dict[str, int]] | None = None) -> dict[str, Any]:
         comps = merge_token_components(router_usage, extra)
@@ -1038,8 +1164,11 @@ async def process_user_query(
         follow_up = (route_result.get("follow_up_message") or "").strip() if isinstance(route_result, dict) else ""
         if not follow_up:
             follow_up = "Could you tell me a bit more so I can help you better?"
-        # If model still asked for an order number despite having PAST ORDERS, list them instead.
-        if (order_history or "").strip() and "order number" in follow_up.lower():
+        # Only list past orders when the USER asked about orders — never because our
+        # canned follow-up text happens to mention "order number".
+        if (order_history or "").strip() and _message_asks_about_past_orders(
+            message or "", chat_history
+        ):
             return {
                 "route": "GENERAL_CHAT",
                 "conversational_response": _format_past_orders_reply(order_history or ""),

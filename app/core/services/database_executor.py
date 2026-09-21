@@ -17,6 +17,17 @@ from app.core.services.webcrawler import Services
 # Store knowledge types we search (collection stored as 'collect' in DB)
 SEARCH_DATA_TYPES = ("product", "page", "collect", "custom")
 _SEARCH_TYPES_SQL = "'product', 'page', 'collect', 'custom'"
+_PRODUCT_TYPES_SQL = "'product'"
+_KNOWLEDGE_TYPES_SQL = "'page', 'collect', 'custom'"
+
+
+def _types_sql_for_scope(scope: str | None) -> str:
+    s = (scope or "products").strip().lower()
+    if s in ("knowledge", "pages", "policy", "faq"):
+        return _KNOWLEDGE_TYPES_SQL
+    if s in ("all", "both", "any"):
+        return _SEARCH_TYPES_SQL
+    return _PRODUCT_TYPES_SQL
 
 
 def _build_catalog_browse_sql(
@@ -36,28 +47,7 @@ def _build_catalog_browse_sql(
 
     params: list[Any] = [store_id]
     pos = 2
-    filter_clauses: list[str] = []
-    if filters:
-        if filters.get("color"):
-            filter_clauses.append(
-                f" AND (variant_data IS NOT NULL AND (variant_data->>'color')::text ILIKE ${pos}) "
-            )
-            params.append(f"%{filters['color']}%")
-            pos += 1
-        if filters.get("size"):
-            filter_clauses.append(
-                f" AND (variant_data IS NOT NULL AND (variant_data->>'size')::text ILIKE ${pos}) "
-            )
-            params.append(f"%{filters['size']}%")
-            pos += 1
-        if filters.get("category"):
-            # Category lives in content / title for Comez+Shopify synced rows
-            filter_clauses.append(
-                f" AND (title ILIKE ${pos} OR coalesce(content, '') ILIKE ${pos}) "
-            )
-            params.append(f"%{filters['category']}%")
-            pos += 1
-    filter_sql = "".join(filter_clauses)
+    filter_sql, pos = _append_common_filters(filters, params, pos)
     params.append(limit)
     limit_pos = len(params)
 
@@ -84,7 +74,7 @@ def _append_common_filters(
     params: list[Any],
     pos: int,
 ) -> tuple[str, int]:
-    """Shared color/size/category ILIKE clauses. Returns (sql_fragment, next_pos)."""
+    """Shared color/size/category/price/collection clauses. Returns (sql_fragment, next_pos)."""
     filter_clauses: list[str] = []
     if not filters:
         return "", pos
@@ -106,7 +96,75 @@ def _append_common_filters(
         )
         params.append(f"%{filters['category']}%")
         pos += 1
+    # Hard price bounds (Decimal column) — constrained mode relies on these.
+    if filters.get("price_min") is not None:
+        try:
+            pmin = float(filters["price_min"])
+            filter_clauses.append(f" AND price IS NOT NULL AND price >= ${pos} ")
+            params.append(pmin)
+            pos += 1
+        except (TypeError, ValueError):
+            pass
+    if filters.get("price_max") is not None:
+        try:
+            pmax = float(filters["price_max"])
+            filter_clauses.append(f" AND price IS NOT NULL AND price <= ${pos} ")
+            params.append(pmax)
+            pos += 1
+        except (TypeError, ValueError):
+            pass
+    # Collection membership: JSONB array of titles/handles (fallback: content text).
+    if filters.get("collection"):
+        coll = str(filters["collection"]).strip()
+        if coll:
+            filter_clauses.append(
+                f" AND ("
+                f"  (collection_handles IS NOT NULL AND EXISTS ("
+                f"    SELECT 1 FROM jsonb_array_elements_text("
+                f"      CASE WHEN jsonb_typeof(collection_handles) = 'array'"
+                f"           THEN collection_handles ELSE '[]'::jsonb END"
+                f"    ) AS h WHERE h ILIKE ${pos}"
+                f"  ))"
+                f"  OR coalesce(content, '') ILIKE ${pos}"
+                f") "
+            )
+            params.append(f"%{coll}%")
+            pos += 1
     return "".join(filter_clauses), pos
+
+
+def _normalize_filters(filters_raw: Any) -> dict[str, Any]:
+    if not isinstance(filters_raw, dict):
+        return {}
+    out: dict[str, Any] = {
+        "color": filters_raw.get("color"),
+        "size": filters_raw.get("size"),
+        "category": filters_raw.get("category"),
+        "collection": filters_raw.get("collection"),
+        "price_min": None,
+        "price_max": None,
+    }
+    for key in ("price_min", "price_max"):
+        val = filters_raw.get(key)
+        if val is None or val == "":
+            continue
+        try:
+            out[key] = float(val)
+        except (TypeError, ValueError):
+            out[key] = None
+    return out
+
+
+def _has_hard_constraints(filters: dict | None, sort_column: str | None) -> bool:
+    """True when we must filter/sort in SQL (not RRF-first)."""
+    f = filters or {}
+    if f.get("price_min") is not None or f.get("price_max") is not None:
+        return True
+    if f.get("collection"):
+        return True
+    if (sort_column or "").lower() == "price":
+        return True
+    return False
 
 
 def _price_order_sql(sort_order: str) -> str:
@@ -155,6 +213,7 @@ def _build_keyword_only_sql(
     sort_column: str | None,
     sort_order: str | None,
     limit: int,
+    data_types_sql: str = _PRODUCT_TYPES_SQL,
 ) -> tuple[str, list[Any]]:
     """Branch B: No context, has keywords. Keyword-only full-text with websearch_to_tsquery."""
     params: list[Any] = [store_id, search_keywords.strip()]
@@ -174,11 +233,11 @@ def _build_keyword_only_sql(
 
     # websearch_to_tsquery understands Google-style OR, quotes, etc.; ts_rank gives keyword_score
     sql = f"""
-    SELECT id, title, content, price, url, image_url,
+    SELECT id, title, content, price, url, image_url, data_type,
            ts_rank(to_tsvector('english', title || ' ' || coalesce(content, '')), websearch_to_tsquery('english', $2)) AS keyword_score
     FROM store_knowledge
     WHERE store_id = $1
-      AND data_type = 'product'
+      AND data_type IN ({data_types_sql})
       AND to_tsvector('english', title || ' ' || coalesce(content, '')) @@ websearch_to_tsquery('english', $2)
       {filter_sql}
     {order_sql}
@@ -244,6 +303,7 @@ def _build_path_b_sql(
     sort_column: str | None,
     sort_order: str | None,
     limit: int,
+    data_types_sql: str = _SEARCH_TYPES_SQL,
 ) -> tuple[str, list[Any]]:
     """Path B: RRF hybrid with dynamic sorting."""
     params: list[Any] = [store_id, vector_json]
@@ -270,11 +330,11 @@ def _build_path_b_sql(
     if keyword_param_pos is not None:
         keyword_cte = f"""
     keyword_search AS (
-        SELECT id, title, content, price, url, image_url,
+        SELECT id, title, content, price, url, image_url, data_type,
                ROW_NUMBER() OVER (ORDER BY ts_rank(to_tsvector('english', title || ' ' || coalesce(content, '')), websearch_to_tsquery('english', ${keyword_param_pos})) DESC) as rank_k
         FROM store_knowledge
         WHERE store_id = $1
-          AND data_type IN ('product', 'page', 'collect', 'custom')
+          AND data_type IN ({data_types_sql})
           AND to_tsvector('english', title || ' ' || coalesce(content, '')) @@ websearch_to_tsquery('english', ${keyword_param_pos})
           {filter_sql}
         LIMIT 40
@@ -282,7 +342,7 @@ def _build_path_b_sql(
     else:
         keyword_cte = """
     keyword_search AS (
-        SELECT id, title, content, price, url, image_url, 0::integer as rank_k
+        SELECT id, title, content, price, url, image_url, NULL::text as data_type, 0::integer as rank_k
         FROM store_knowledge
         WHERE 1 = 0
     )"""
@@ -309,11 +369,11 @@ def _build_path_b_sql(
     sql = f"""
     WITH
     vector_search AS (
-        SELECT id, title, content, price, url, image_url,
+        SELECT id, title, content, price, url, image_url, data_type,
                ROW_NUMBER() OVER (ORDER BY embedding <=> $2::vector) as rank_v
         FROM store_knowledge
         WHERE store_id = $1
-          AND data_type IN ('product', 'page', 'collect', 'custom')
+          AND data_type IN ({data_types_sql})
           AND embedding IS NOT NULL
           {filter_sql}
         ORDER BY embedding <=> $2::vector
@@ -327,6 +387,7 @@ def _build_path_b_sql(
         COALESCE(v.price, k.price) as price,
         COALESCE(v.url, k.url) as url,
         COALESCE(v.image_url, k.image_url) as image_url,
+        COALESCE(v.data_type, k.data_type) as data_type,
         {final_score_expr} as final_score
     FROM vector_search v
     FULL OUTER JOIN keyword_search k ON v.id = k.id
@@ -346,30 +407,38 @@ class DatabaseExecutor:
         Returns list of dicts with keys id, title, content, price, url, image_url (and final_score for Branch C).
         """
         payload = payload or {}
-        filters_raw = payload.get("filters") or {}
-        if isinstance(filters_raw, dict):
-            filters = {
-                "color": filters_raw.get("color"),
-                "size": filters_raw.get("size"),
-                "category": filters_raw.get("category"),
-            }
-        else:
-            filters = {}
+        filters = _normalize_filters(payload.get("filters") or {})
         search_keywords = (payload.get("search_keywords") or "").strip()
         semantic_context = (payload.get("semantic_context") or "").strip()
         sort_column = payload.get("sort_column")
         sort_order = payload.get("sort_order")
         limit = int(payload.get("limit") or 5)
         limit = max(1, min(limit, 50))
+        search_scope = (payload.get("search_scope") or "products").strip().lower()
+        data_types_sql = _types_sql_for_scope(search_scope)
 
-        # "Cheapest X" is SQL sort, not vector search — drop semantic so Branch B can price-sort.
-        if (sort_column or "").lower() == "price" and search_keywords:
+        # Constrained mode: price/collection/price-sort → keyword SQL filter then sort
+        # (never RRF top-K first, or cheapest-in-budget can be missed).
+        if _has_hard_constraints(filters, sort_column) and (
+            search_keywords or filters.get("price_max") is not None or filters.get("collection")
+        ):
             semantic_context = ""
+            if (sort_column or "").lower() != "price" and (
+                filters.get("price_max") is not None or filters.get("price_min") is not None
+            ):
+                # Budget ask without explicit sort → cheapest first among matches
+                sort_column = sort_column or "price"
+                sort_order = sort_order or "ASC"
+
+        # Knowledge/policy asks: never fall into product-only catalog browse.
+        if search_scope in ("knowledge", "pages", "policy", "faq") and not search_keywords:
+            search_keywords = (semantic_context or "shipping policy FAQ").strip()[:120]
 
         conn = connections.get("default")
 
-        # Branch A: Catalog browse — no keywords (e.g. 'What is the cheapest product?')
-        if not search_keywords:
+        # Branch A: Catalog browse — products only (cheapest / browse)
+        # Allow browse with only price/collection filters and no keywords.
+        if not search_keywords and search_scope not in ("knowledge", "pages", "policy", "faq", "all", "both"):
             try:
                 sql, params = _build_catalog_browse_sql(
                     store_id, sort_column, sort_order, limit, filters=filters
@@ -402,18 +471,21 @@ class DatabaseExecutor:
 
         async def _run_keyword(kw: str, filt: dict) -> list[dict[str, Any]]:
             sql, params = _build_keyword_only_sql(
-                store_id, kw, filt, sort_column, sort_order, limit
+                store_id, kw, filt, sort_column, sort_order, limit,
+                data_types_sql=data_types_sql,
             )
             rows = await conn.execute_query_dict(sql, params)
             return [dict(r) for r in rows] if rows else []
 
         # Branch B: Keyword only — no semantic_context. No embedding API.
+        # Also used for constrained price/collection queries.
         if not semantic_context and search_keywords:
             try:
                 rows = await _run_keyword(search_keywords, filters)
                 print(
-                    f"DatabaseExecutor Branch B (keyword): kw={search_keywords!r} "
-                    f"filters={filters} sort={sort_column}/{sort_order} → {len(rows)} rows",
+                    f"DatabaseExecutor Branch B (keyword/constrained): scope={search_scope} "
+                    f"kw={search_keywords!r} filters={filters} sort={sort_column}/{sort_order} "
+                    f"→ {len(rows)} rows",
                     flush=True,
                 )
                 # Soft category: LLM often invents 'apparel' etc. that never appear in catalog text.
@@ -452,6 +524,9 @@ class DatabaseExecutor:
         rrf = payload.get("rrf_weights") or {}
         vector_weight = float(rrf.get("vector_weight", 0.5))
         keyword_weight = float(rrf.get("keyword_weight", 0.5))
+        # Knowledge defaults lean keyword if caller omitted weights
+        if search_scope in ("knowledge", "pages", "policy", "faq") and not rrf:
+            keyword_weight, vector_weight = 0.6, 0.4
         total = vector_weight + keyword_weight
         if total <= 0:
             vector_weight, keyword_weight = 0.5, 0.5
@@ -470,12 +545,17 @@ class DatabaseExecutor:
                 sort_column,
                 sort_order,
                 limit,
+                data_types_sql=data_types_sql,
             )
             rows = await conn.execute_query_dict(sql, params)
             return [dict(r) for r in rows] if rows else []
 
         try:
             rows = await _run_hybrid(search_keywords, filters)
+            print(
+                f"DatabaseExecutor Branch C (hybrid/relevance): scope={search_scope} → {len(rows)} rows",
+                flush=True,
+            )
             if not rows and filters.get("category"):
                 rows = await _run_hybrid(search_keywords, {**filters, "category": None})
                 print(
@@ -494,7 +574,6 @@ class DatabaseExecutor:
         except Exception as e:
             print(f"DatabaseExecutor Branch C (hybrid) error: {e}", flush=True)
             return []
-
 
 async def execute_search(store_id: int, payload: dict) -> list[dict[str, Any]]:
     """Convenience async function: run DatabaseExecutor.execute_search."""

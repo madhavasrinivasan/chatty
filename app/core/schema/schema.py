@@ -202,7 +202,19 @@ class SearchPayloadFilters(BaseModel):
     size: Optional[str] = Field(default=None, description="Extracted size filter or null.")
     category: Optional[str] = Field(
         default=None,
-        description="Category / collection theme matched in title or content (e.g. towels, apparel).",
+        description="Category theme matched in title or content (e.g. towels). Not a Shopify collection.",
+    )
+    price_min: Optional[float] = Field(
+        default=None,
+        description="Minimum price (inclusive). From 'over 500', 'above 200', etc.",
+    )
+    price_max: Optional[float] = Field(
+        default=None,
+        description="Maximum price (inclusive). From 'under 200', 'below 500', 'max 999', etc.",
+    )
+    collection: Optional[str] = Field(
+        default=None,
+        description="Shopify collection name/handle (e.g. 'best sellers', 'bestsellers').",
     )
 
 
@@ -232,7 +244,7 @@ class SearchPayload(BaseModel):
     limit: int = Field(default=5, description="How many items to return. Default 5 unless specified.")
     filters: SearchPayloadFilters = Field(
         default_factory=SearchPayloadFilters,
-        description="Extracted color/size filters.",
+        description="Extracted color/size/price/collection filters.",
     )
     rrf_weights: RRFWeights = Field(
         default_factory=lambda: RRFWeights(keyword_weight=0.5, vector_weight=0.5),
