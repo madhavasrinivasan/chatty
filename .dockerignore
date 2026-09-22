@@ -1,0 +1,25 @@
+# Never bake host venv / secrets into the image
+.venv/
+venv/
+.env
+.env.*
+!.env.docker.example
+secrets/
+Assets/
+rag/
+.git
+.gitignore
+__pycache__/
+*.pyc
+.idea/
+.vscode/
+*.log
+*.md
+*.pdf
+shopify_products.json
+docker-compose.yml
+Dockerfile
+.dockerignore
+migrations/
+scripts/
+worker.py

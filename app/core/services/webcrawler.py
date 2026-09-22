@@ -1,5 +1,4 @@
 import asyncio
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig , VirtualScrollConfig , MemoryAdaptiveDispatcher
 from langchain_core.documents import Document as LangchainDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from llama_index.core import Document
@@ -28,59 +27,10 @@ class Services():
 
     @staticmethod
     async def crawlweb(urls: list[str]):
-        browser_cfg = BrowserConfig(
-            headless=True,
-            viewport_width=1366,  # Smaller = less RAM
-            viewport_height=768,
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        )
-
-        # Virtual scroll config for complete content capture
-        virtual_scroll = VirtualScrollConfig(
-            container_selector="body",        # Scroll entire page
-            scroll_count=20,                  # Max scrolls (adjust based on site)
-            scroll_by="page_height",          # Full page scrolls
-            wait_after_scroll=1.5             # Wait for AJAX/content load
-        )
-
-        run_cfg = CrawlerRunConfig(
-            wait_until="domcontentloaded",
-            wait_for_timeout=15000,
-            delay_before_return_html=2.0,
-            wait_for_images=False,
-            scan_full_page=True,              # Enable full page scanning
-            scroll_delay=0.8,
-            max_scroll_steps=20,              # Fallback scroll steps
-            virtual_scroll_config=virtual_scroll,  # Proper nesting
-            only_text=False,                  # Ensure markdown output (not plain text)
-            js_code="""
-                // Force lazy loading + full scroll
-                window.scrollTo(0, document.body.scrollHeight);
-                document.querySelectorAll('[loading="lazy"], [data-src]').forEach(el => {
-                    el.src = el.dataset.src || el.src;
-                    el.loading = 'eager';
-                });
-                // Trigger common infinite scroll patterns
-                const loadMoreBtns = document.querySelectorAll('.load-more, [data-load-more]');
-                loadMoreBtns.forEach(btn => btn?.click());
-            """,
-            css_selector="body *:not(script):not(style):not(noscript)",
-            word_count_threshold=3,
-            verbose=True,                     # Debug logging
-        )
-
-        async with AsyncWebCrawler(config=browser_cfg) as crawler:
-            results = await crawler.arun_many(
-                urls=urls,
-                config=run_cfg,
-                dispatcher=MemoryAdaptiveDispatcher(
-                memory_threshold_percent=70.0,
-                check_interval=1.0,
-                max_session_permit=2  # 2 browsers max
-            )
-            )
-        
-        return results 
+        # crawl4ai removed (no Alpine musl wheels for patchright). Use Shopify/Comez ingest instead.
+        raise ApplicationError.SomethingWentWrong(
+            "Web crawling is disabled. Sync catalog via Shopify/Comez ingest."
+        ) 
 
     @staticmethod
     async def documents_to_nodes(documents):

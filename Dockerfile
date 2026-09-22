@@ -1,20 +1,52 @@
-FROM apache/age:latest
+# syntax=docker/dockerfile:1
+# Alpine + uv. crawl4ai/patchright removed so musl wheels work.
+# Never copy host .venv.
 
-USER root
+ARG PYTHON_VERSION=3.12
 
-# 1. Install build tools and PG18 headers
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    git \
-    postgresql-server-dev-18 \
-    && rm -rf /var/lib/apt/lists/*
+FROM python:${PYTHON_VERSION}-alpine
 
-# 2. Build pgvector specifically for the PG18 paths
-RUN git clone --branch v0.8.0 https://github.com/pgvector/pgvector.git \
-    && cd pgvector \
-    && make PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config \
-    && make PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config install \
-    && cd .. \
-    && rm -rf pgvector
+RUN apk add --no-cache \
+    ca-certificates \
+    build-base \
+    libffi-dev \
+    openssl-dev \
+    cargo \
+    rust \
+    zlib-dev \
+    jpeg-dev \
+    libpng-dev \
+    freetype-dev \
+    linux-headers \
+    python3-dev \
+    libffi \
+    openssl \
+    libstdc++ \
+    libjpeg \
+    zlib \
+    libpng \
+    freetype
 
-USER postgres
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PORT=3009
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
+
+COPY main.py ./
+COPY app ./app
+
+RUN mkdir -p /app/Assets/PDF /app/rag /app/secrets
+
+EXPOSE 3009
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "3009"]
