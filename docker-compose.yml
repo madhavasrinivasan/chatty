@@ -1,34 +1,35 @@
-# Chatty backend — build from local clone; secrets via .env (not in git)
+# Chatty backend — secrets live in .env (gitignored), not in this file.
 #
-# On server (first time):
-#   git clone <repo> && cd chatty_backend
-#   create .env + secrets/
+# First time:
+#   create .env with POSTGRES_* + app secrets (see .env.docker.example)
 #   docker compose up -d --build
 #
-# Recreate store_knowledge (vector + FTS) on an existing DB:
-#   docker compose exec -T db psql -U chatty -d chatty < docker/postgres/02-store_knowledge.sql
-#   then re-sync products
+# Read data:
+#   docker compose exec db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+#   # or from host: psql "postgresql://USER:PASS@localhost:5432/DB"
 #
-# After code changes:
-#   git pull && docker compose up -d --build
+# Recreate store_knowledge (wipes catalog):
+#   docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < docker/postgres/02-store_knowledge.sql
 
 services:
   db:
     image: pgvector/pgvector:pg16
     container_name: chatty-db
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      POSTGRES_USER: chatty
-      POSTGRES_PASSWORD: chatty
-      POSTGRES_DB: chatty
+      POSTGRES_USER: ${POSTGRES_USER:-chatty}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-chatty}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - chatty_pgdata:/var/lib/postgresql/data
       - ./docker/postgres/init-vector.sql:/docker-entrypoint-initdb.d/01-vector.sql:ro
       - ./docker/postgres/02-store_knowledge.sql:/docker-entrypoint-initdb.d/02-store_knowledge.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U chatty -d chatty"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -66,7 +67,8 @@ services:
     env_file:
       - .env
     environment:
-      DB_URL: postgresql://chatty:chatty@db:5432/chatty
+      # Inside the network, host is service name "db"
+      DB_URL: postgresql://${POSTGRES_USER:-chatty}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-chatty}
       ENV: production
       DEBUG: "false"
     volumes:
@@ -92,7 +94,7 @@ services:
     env_file:
       - .env
     environment:
-      DB_URL: postgresql://chatty:chatty@db:5432/chatty
+      DB_URL: postgresql://${POSTGRES_USER:-chatty}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-chatty}
       ENV: production
       DEBUG: "false"
     volumes:
