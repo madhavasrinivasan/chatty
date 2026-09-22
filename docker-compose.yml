@@ -2,16 +2,15 @@
 #
 # On server (first time):
 #   git clone <repo> && cd chatty_backend
-#   cp /secure/path/.env .env          # keep out of git
-#   mkdir -p secrets && put Vertex JSON here
+#   create .env + secrets/
 #   docker compose up -d --build
 #
-# After code changes on GitHub:
-#   git pull
-#   docker compose up -d --build
+# Recreate store_knowledge (vector + FTS) on an existing DB:
+#   docker compose exec -T db psql -U chatty -d chatty < docker/postgres/02-store_knowledge.sql
+#   then re-sync products
 #
-# After only .env / secrets change (no code):
-#   docker compose up -d               # or: docker compose restart api
+# After code changes:
+#   git pull && docker compose up -d --build
 
 services:
   db:
@@ -27,6 +26,7 @@ services:
     volumes:
       - chatty_pgdata:/var/lib/postgresql/data
       - ./docker/postgres/init-vector.sql:/docker-entrypoint-initdb.d/01-vector.sql:ro
+      - ./docker/postgres/02-store_knowledge.sql:/docker-entrypoint-initdb.d/02-store_knowledge.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U chatty -d chatty"]
       interval: 5s
@@ -79,6 +79,27 @@ services:
       timeout: 5s
       retries: 5
       start_period: 40s
+
+  worker:
+    image: chatty-api:latest
+    container_name: chatty-worker
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      DB_URL: postgresql://chatty:chatty@db:5432/chatty
+      ENV: production
+      DEBUG: "false"
+    volumes:
+      - ./secrets:/app/secrets:ro
+      - ./Assets:/app/Assets
+      - chatty_rag:/app/rag
+    command: ["python", "worker.py"]
 
 volumes:
   chatty_pgdata:

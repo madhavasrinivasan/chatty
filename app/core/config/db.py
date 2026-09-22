@@ -36,9 +36,11 @@ async def init_db():
     await _upgrade_background_tasks_columns()
     await _upgrade_billing_tables()
 
-    if settings.env == "development":
-        await Tortoise.generate_schemas(safe=True)
-        await _upgrade_store_knowledge_vector_search()
+    # Safe for prod: create missing tables without wiping data.
+    # store_knowledge vector/tsvector columns come from SQL
+    # (docker/postgres/02-store_knowledge.sql) — Tortoise cannot define them.
+    await Tortoise.generate_schemas(safe=True)
+    await _upgrade_store_knowledge_vector_search()
 
 
 async def _upgrade_billing_tables():

@@ -22,4 +22,3 @@ Dockerfile
 .dockerignore
 migrations/
 scripts/
-worker.py

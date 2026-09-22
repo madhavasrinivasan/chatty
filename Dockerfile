@@ -42,7 +42,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
-COPY main.py ./
+COPY main.py worker.py ./
 COPY app ./app
 
 RUN mkdir -p /app/Assets/PDF /app/rag /app/secrets
