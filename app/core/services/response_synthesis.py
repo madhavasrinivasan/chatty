@@ -10,6 +10,7 @@ from app.core.config.config import settings
 from app.core.config.gemini_client import generate_content_text, get_genai_client
 from app.core.schema.schema import (
     FinalFrontendResponse,
+    FrontendAction,
     FrontendProductCard,
     LLMSynthesisOutput,
 )
@@ -276,9 +277,107 @@ def _format_active_chat_for_synthesizer(active_chat_history: list[dict[str, Any]
     for m in active_chat_history:
         role = (m.get("role") or "user") if isinstance(m, dict) else "user"
         content = (m.get("content") or "") if isinstance(m, dict) else str(m)
-        if content:
-            lines.append(f"{role}: {content}")
+        prods = m.get("products") if isinstance(m, dict) else None
+        prod_snippet = ""
+        if prods and isinstance(prods, list):
+            items = []
+            for idx, p in enumerate(prods[:5]):
+                if isinstance(p, dict):
+                    t = p.get("title") or "Item"
+                    pid = p.get("product_id") or p.get("id") or ""
+                    vid = p.get("variant_id") or ""
+                    items.append(f"#{idx+1}: '{t}' (id: {pid}, variant: {vid})")
+            if items:
+                prod_snippet = f"\n  [Attached products shown in this turn: {', '.join(items)}]"
+        if content or prod_snippet:
+            lines.append(f"{role}: {content}{prod_snippet}")
     return "\n".join(lines) if lines else ""
+
+
+async def _resolve_frontend_action(
+    llm_action: Any,
+    hybrid_results: list[dict[str, Any]],
+    frontend_cards: list[FrontendProductCard],
+    store_id: int | None = None,
+) -> FrontendAction | None:
+    if not llm_action:
+        return None
+    act_type = getattr(llm_action, "type", None) or (llm_action.get("type") if isinstance(llm_action, dict) else None)
+    if not act_type:
+        return None
+
+    idx = getattr(llm_action, "product_index", None) or (llm_action.get("product_index") if isinstance(llm_action, dict) else None)
+    pid = getattr(llm_action, "product_id", None) or (llm_action.get("product_id") if isinstance(llm_action, dict) else None)
+    opts = getattr(llm_action, "requested_options", None) or (llm_action.get("requested_options") if isinstance(llm_action, dict) else []) or []
+    qty = getattr(llm_action, "quantity", 1) or (llm_action.get("quantity") if isinstance(llm_action, dict) else 1) or 1
+    discount_code = getattr(llm_action, "discount_code", None) or (llm_action.get("discount_code") if isinstance(llm_action, dict) else None)
+
+    target_card: FrontendProductCard | None = None
+    target_row: dict[str, Any] | None = None
+
+    if isinstance(idx, int) and idx > 0:
+        if idx <= len(frontend_cards):
+            target_card = frontend_cards[idx - 1]
+        elif idx <= len(hybrid_results):
+            target_row = hybrid_results[idx - 1]
+
+    if not target_card and not target_row and pid:
+        pid_str = str(pid).strip()
+        for c in frontend_cards:
+            if str(c.product_id).strip() == pid_str or pid_str in str(c.product_id):
+                target_card = c
+                break
+        if not target_card:
+            for r in hybrid_results:
+                row_pid = str(r.get("id") or r.get("shopify_product_id") or r.get("product_id") or "").strip()
+                if row_pid == pid_str or pid_str in row_pid:
+                    target_row = r
+                    break
+
+    if not target_card and not target_row:
+        if len(frontend_cards) == 1:
+            target_card = frontend_cards[0]
+        elif len(hybrid_results) == 1:
+            target_row = hybrid_results[0]
+
+    variant_id: str | None = None
+    product_title: str | None = None
+
+    if target_card:
+        variant_id = str(target_card.variant_id)
+        product_title = target_card.title
+    elif target_row:
+        product_title = target_row.get("title") or target_row.get("name")
+        variant_id = str(target_row.get("variant_id") or "")
+        if not variant_id:
+            row_pid = str(target_row.get("id") or target_row.get("shopify_product_id") or target_row.get("product_id") or "")
+            if row_pid and store_id:
+                try:
+                    v_row = await get_variant_data_from_db(row_pid, store_id)
+                    vars_list = v_row.get("variants") or []
+                    matched = find_best_variant_match(opts, vars_list)
+                    if matched:
+                        variant_id = str(matched.get("id") or matched.get("variant_id") or "")
+                except Exception:
+                    pass
+
+    code_clean = (discount_code or "").strip() if discount_code else None
+    if not code_clean and target_row:
+        d_list = target_row.get("discount_info") or []
+        if isinstance(d_list, list) and d_list:
+            code_clean = d_list[0].get("code")
+
+    final_type = act_type
+    if final_type == "AUTO_ADD_TO_CART" and code_clean:
+        final_type = "ADD_AND_APPLY_DISCOUNT"
+
+    return FrontendAction(
+        type=final_type,
+        variant_id=variant_id or None,
+        quantity=max(1, int(qty)),
+        discount_code=code_clean,
+        product_title=product_title,
+    )
 
 
 async def generate_final_response(
@@ -298,12 +397,10 @@ async def generate_final_response(
     """
     Top-to-bottom flow:
     A) Single LLM call with full context (user_facts, order_history, previous_session_history, entire active chat).
-    B) Build FinalFrontendResponse from LLM; if selected_products empty, return immediately.
+    B) Build FinalFrontendResponse from LLM.
     C) Concurrent get_variant_data_from_db + find_best_variant_match per product.
     D) Concurrent check_shopify_inventory_rest; only in-stock items go to products.
-
-    Returns (response, token_usage_chunk) where token_usage_chunk maps "final_response" -> input/output estimates.
-    thinking_budget: override settings.gemini_synthesis_thinking_budget when provided (e.g. extended thinking).
+    E) Resolve any requested client actions (AUTO_ADD_TO_CART, APPLY_DISCOUNT).
     """
     print(f"generate_final_response: {user_query}")
     budget = (
@@ -319,6 +416,7 @@ async def generate_final_response(
         context = json.dumps(
             [
                 {
+                    "index": i + 1,
                     "id": r.get("id"),
                     "shopify_product_id": r.get("shopify_product_id"),
                     "title": r.get("title"),
@@ -328,7 +426,7 @@ async def generate_final_response(
                     "image_url": r.get("image_url"),
                     "discount_info": r.get("discount_info"),
                 }
-                for r in indexed[:8]
+                for i, r in enumerate(indexed[:8])
             ],
             separators=(",", ":"),
             default=str,
@@ -356,27 +454,31 @@ async def generate_final_response(
         "(active session, past chats, facts, orders, and current cart) to sell like a knowledgeable human rep who is trusted with real store data.\n\n"
         "TONE & BEHAVIOR RULES (follow all):\n"
         "1. BE ASSUMPTIVE, NOT PERMISSION-SEEKING. Recommend directly and drive toward the sale. "
-        "Say 'Here's the X in your size — tap Add to cart on the card if you want it.' NOT 'You might like…' or 'I can look into that.'\n"
+        "Say 'Here's the X in your size — I can add it to your cart or you can tap Add to Cart below.'\n"
         "2. ALWAYS CITE EXACT NUMBERS. State exact price with currency and, when a product has a discount, the exact percentage or amount AND the exact code "
         "(e.g. 'It's $48.00, and 15% off right now with code SAVE15'). NEVER use vague phrasing like 'some savings' or 'a discount'.\n"
         "3. ALWAYS END WITH A NEXT STEP. Every general_answer must close with a specific action or question "
-        "(e.g. 'Tap Add to cart on the card below' or 'Should I pull up the size guide?'). Never leave a dead end.\n"
+        "(e.g. 'Would you like me to add this to your cart?' or 'Should I apply coupon SAVE10 for you?'). Never leave a dead end.\n"
         "4. NEVER CLAIM YOU LACK ACCESS to data that is already provided above. If facts, past orders, the cart, or catalog results are in context, use them confidently. "
         "Never say things like 'I don't have access to that' when the information is present.\n"
         "5. NEVER MENTION STOCK OR AVAILABILITY. Do NOT say an item is in stock, low stock, or sold out, and do NOT add stock disclaimers. "
         "Inventory is verified separately by the system, not by you.\n"
         "6. PERSONALIZE. Acknowledge past conversations when relevant and suggest items based on past orders (e.g., sizing up, complementary items).\n"
-        "7. DISCOUNTS. If any product in the context has a non-empty `discount_info` list, you MUST surface it in general_answer with the exact number and code. "
-        "When multiple products have discounts, lead with the best one.\n"
-        "8. YOU CANNOT ADD TO CART VIA CHAT. Adding to cart only works from the product card button in the UI. "
-        "Never offer to add items yourself, never say 'want me to add … to your cart?', and never use suggested_actions "
-        "like 'Add X to cart' or 'Add to cart' — those become chat messages and cannot add to cart. "
-        "Point shoppers to the card's Add to cart button instead; keep suggested_actions as questions or browse/help asks "
-        "(e.g. 'Show me similar styles', 'Do you have a size guide?', 'What colors does this come in?').\n"
+        "7. DISCOUNTS & COUPONS:\n"
+        "   - If any product in context has discount_info, or if active discounts are present, you MUST cite the exact code and amount/percentage.\n"
+        "   - When recommending products with discounts, in suggested_actions offer: 'Apply code <CODE>' and ask in general_answer: 'Want me to apply code <CODE> to your cart?'\n"
+        "   - If the user asks to apply a coupon/discount, set action.type to 'APPLY_DISCOUNT' (or 'ADD_AND_APPLY_DISCOUNT') and provide the discount_code.\n"
+        "8. AUTO ADD TO CART & PRODUCT ACTIONS:\n"
+        "   - Whenever you recommend products, ALWAYS include helpful follow-up chips in suggested_actions like 'Add <Product Name> to cart'.\n"
+        "   - If the shopper asks to add an item to their cart (e.g. 'add to cart', 'add the first one', 'add the second product', 'buy the blue one', 'yes add it'), you MUST populate the `action` field!\n"
+        "   - Set action.type to 'AUTO_ADD_TO_CART' (or 'ADD_AND_APPLY_DISCOUNT' if a coupon is also specified/available).\n"
+        "   - Set action.product_index to the 1-based index (e.g. 1 for first product, 2 for second product) from search results or previous chat turns.\n"
+        "   - If requested_options like color/size are specified (e.g. ['Blue', 'L']), put them in action.requested_options.\n"
+        "   - If the user's choice is ambiguous, ask a clarifying question in general_answer: 'Which product would you like me to add?' and leave action as null.\n"
+        "   - When adding an item, confirm enthusiastically in general_answer: 'I've added the <Product Name> to your cart!'\n"
         "9. PRODUCT CARDS ARE MANDATORY WHEN YOU RECOMMEND. If you name, recommend, or quote a price for any product from "
         "the search results, you MUST include that product in selected_products using the exact `id` field from the results "
-        "(string). Saying 'tap Add to cart on the card below' without selected_products is a bug — the UI will show no card. "
-        "Never put product image_url values into urls; urls is only for policy/sizing/collection page links.\n\n"
+        "(string). Never put product image_url values into urls; urls is only for policy/sizing/collection page links.\n\n"
     )
     prompt = f"""{instruction}{memory_block}Current user question: "{user_query}".
 
@@ -384,10 +486,19 @@ Search results from our catalog (use these to answer and to pick products):
 {context}
 
 Output a JSON object with this exact shape. Use empty lists [] when not relevant.
-- general_answer: Markdown answer written as an assumptive sales rep. Recommend directly, cite exact prices/discount %/codes, and end with a specific next action or question. Do NOT mention stock/availability or claim missing access. Do NOT offer to add items to cart yourself — point to the product card button if relevant.
+- general_answer: Markdown answer written as an assumptive sales rep. Recommend directly, cite exact prices/discount %/codes, and end with a specific next action or question. If adding an item to cart or applying a discount, confirm it here.
 - urls: Policy/sizing/collection page links ONLY. Never product image URLs. Empty [] if none.
 - selected_products: REQUIRED whenever you recommend catalog products. List of {{ "product_id": "<exact id from results above>", "requested_options": [] or e.g. ["Black","XL"] }}. Max 5. Empty [] ONLY if the answer is not about specific products.
-- suggested_actions: 2-3 short follow-up questions or browse asks for the UI (e.g. "See the size guide", "Show similar styles", "What colors are available?"). NEVER include "Add to cart", "Add … to cart", or any phrase that asks the assistant to add a product to the cart.
+- suggested_actions: 2-3 short follow-up questions or actionable chips for the UI (e.g. "Add <Product Name> to cart", "Apply code <CODE>", "Show size guide").
+- action: Optional client action. Fill when shopper wants to add an item to their cart or apply a discount coupon. Otherwise null.
+  {{
+    "type": "AUTO_ADD_TO_CART" | "APPLY_DISCOUNT" | "ADD_AND_APPLY_DISCOUNT" | null,
+    "product_index": 1-based index (e.g. 1 or 2) or null,
+    "product_id": string or null,
+    "requested_options": ["Blue", "M"] or [],
+    "quantity": 1,
+    "discount_code": "<CODE>" or null
+  }}
 
 Output ONLY valid JSON, no markdown code block."""
 
@@ -418,6 +529,7 @@ Output ONLY valid JSON, no markdown code block."""
             urls=_filter_product_image_urls(data.get("urls") or [], indexed),
             selected_products=data.get("selected_products") or [],
             suggested_actions=data.get("suggested_actions") or [],
+            action=data.get("action"),
         )
     except Exception:
         llm_output = LLMSynthesisOutput(
@@ -425,6 +537,7 @@ Output ONLY valid JSON, no markdown code block."""
             urls=[],
             selected_products=[],
             suggested_actions=["What products do you have?", "Do you have a size guide?"],
+            action=None,
         )
 
     # Hard backfill: prose recommendations without selected_products still get cards.
@@ -440,6 +553,7 @@ Output ONLY valid JSON, no markdown code block."""
             urls=llm_output.urls,
             selected_products=backfilled,
             suggested_actions=llm_output.suggested_actions,
+            action=llm_output.action,
         )
 
     usage_chunk = {
@@ -454,9 +568,11 @@ Output ONLY valid JSON, no markdown code block."""
         urls=llm_output.urls,
         products=[],
         suggested_actions=llm_output.suggested_actions,
+        action=None,
     )
     print(f"llm_output: {llm_output}")
     if not llm_output.selected_products:
+        final.action = await _resolve_frontend_action(llm_output.action, hybrid_results, final.products, store_id)
         return final, usage_chunk
 
     # Step C: Concurrent DB fetch + variant match
@@ -546,4 +662,5 @@ Output ONLY valid JSON, no markdown code block."""
             final.general_answer
             + "\n\nThose specific options are currently unavailable — want me to find you the closest alternatives in stock?"
         )
+    final.action = await _resolve_frontend_action(llm_output.action, hybrid_results, final.products, store_id)
     return final, usage_chunk

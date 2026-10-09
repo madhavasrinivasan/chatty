@@ -330,13 +330,58 @@ class IntentToCart(BaseModel):
     )
 
 
+class LLMAction(BaseModel):
+    """Action instructed by the LLM when shopper asks to add to cart or apply a discount."""
+    type: Optional[Literal["AUTO_ADD_TO_CART", "APPLY_DISCOUNT", "ADD_AND_APPLY_DISCOUNT"]] = Field(
+        default=None,
+        description="Set to AUTO_ADD_TO_CART when user wants to add an item, APPLY_DISCOUNT for coupons, or ADD_AND_APPLY_DISCOUNT for both.",
+    )
+    product_index: Optional[int] = Field(
+        default=None,
+        description="1-based index of the product being added (e.g. 1 for first product, 2 for second product) from search results or recent chat.",
+    )
+    product_id: Optional[str] = Field(
+        default=None,
+        description="Product ID if known, otherwise null.",
+    )
+    requested_options: List[str] = Field(
+        default_factory=list,
+        description="Variant options requested, e.g. ['Blue', 'L'].",
+    )
+    quantity: int = Field(default=1, description="Quantity to add to cart.")
+    discount_code: Optional[str] = Field(
+        default=None,
+        description="Coupon code to apply.",
+    )
+
+
+class FrontendAction(BaseModel):
+    """Action payload for the storefront widget to execute (e.g. cart mutation or discount application)."""
+    type: Literal["AUTO_ADD_TO_CART", "APPLY_DISCOUNT", "ADD_AND_APPLY_DISCOUNT"] = Field(
+        description="Action type to perform in the client storefront."
+    )
+    variant_id: Optional[str] = Field(
+        default=None,
+        description="Resolved variant ID for cart add.",
+    )
+    quantity: int = Field(default=1, description="Quantity to add.")
+    discount_code: Optional[str] = Field(
+        default=None,
+        description="Coupon or discount code to apply.",
+    )
+    product_title: Optional[str] = Field(
+        default=None,
+        description="Product title for user feedback toast/alert.",
+    )
+
+
 class LLMSynthesisOutput(BaseModel):
     """Schema forced on the LLM. Leave lists empty [] when not relevant to the user's query."""
     general_answer: str = Field(
         description=(
             "Answer in Markdown, written as an assumptive sales rep: recommend directly, cite exact prices/discount %/codes, "
             "and end with a specific next action or question. Do not mention stock/availability or claim missing access to data provided in context. "
-            "Do not offer to add items to cart yourself; point shoppers to the product card Add to cart button if relevant."
+            "If user requests adding to cart or applying discount, confirm the action in general_answer and populate the action field."
         )
     )
     urls: List[str] = Field(
@@ -350,9 +395,12 @@ class LLMSynthesisOutput(BaseModel):
     suggested_actions: List[str] = Field(
         default_factory=list,
         description=(
-            "2-3 short follow-up questions for the UI. "
-            "Never include 'Add to cart' or 'Add … to cart' — cart adds are UI-button only."
+            "2-3 short follow-up questions or actionable chips for the UI (e.g. 'Add [Product] to cart', 'Apply code SAVE10', 'Show size guide')."
         ),
+    )
+    action: Optional[LLMAction] = Field(
+        default=None,
+        description="Populate when the shopper explicitly asks to add an item to their cart or apply a discount coupon.",
     )
 
 
@@ -390,7 +438,7 @@ class FinalFrontendResponse(BaseModel):
     )
     suggested_actions: List[str] = Field(
         default_factory=list,
-        description="2-3 suggested follow-up questions.",
+        description="2-3 suggested follow-up questions or action chips.",
     )
     order_status: List[Any] = Field(
         default_factory=list,
@@ -403,6 +451,10 @@ class FinalFrontendResponse(BaseModel):
     order_number: Optional[str] = Field(
         default=None,
         description="When return_ui_items is set, the order number (e.g. #1002) for use in action_payload.order_number on submit.",
+    )
+    action: Optional[FrontendAction] = Field(
+        default=None,
+        description="Client action for the storefront to execute (e.g. auto add to cart or apply discount).",
     )
 
 
@@ -478,3 +530,15 @@ class AddToCartTrackRequest(BaseModel):
 
 class LiveSessionHandoverRequest(BaseModel):
     needs_human: bool
+
+
+class CreateTicketRequest(BaseModel):
+    email: str = Field(description="Customer email address")
+    whatsapp_number: str = Field(description="Customer WhatsApp phone number")
+    issue: str = Field(description="Description of the issue or question")
+    name: Optional[str] = Field(default=None, description="Customer name")
+    subject: Optional[str] = Field(default=None, description="Optional ticket subject")
+
+
+class UpdateTicketStatusRequest(BaseModel):
+    status: str = Field(description="New status: open, in_progress, resolved, closed")

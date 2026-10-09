@@ -516,17 +516,18 @@ class UserMemorySummary(Model):
 class TicketsRaised(Model):
     id = fields.IntField(pk=True)
     user_id = fields.IntField()
-    chatbot_id = fields.IntField()
+    chatbot_id = fields.IntField(null=True)
     ticket_id = fields.CharField(max_length=255)
-    ticket_subject = fields.CharField(max_length=255)
+    ticket_subject = fields.CharField(max_length=255, null=True)
     user_email = fields.CharField(max_length=255)
-    user_name = fields.CharField(max_length=255)
-    user_phone = fields.CharField(max_length=255)
-    user_address = fields.TextField()
-    ticket_description = fields.TextField()
-    ticket_status = fields.CharField(max_length=255)
+    user_name = fields.CharField(max_length=255, null=True)
+    user_phone = fields.CharField(max_length=255)  # WhatsApp number
+    user_address = fields.TextField(null=True)
+    ticket_description = fields.TextField()  # Issue description
+    ticket_status = fields.CharField(max_length=255, default="open")
     ticket_created_at = fields.DatetimeField(auto_now_add=True)
     ticket_updated_at = fields.DatetimeField(auto_now=True)
+
     class Meta:
         table = "tickets_raised"
         indexes = [

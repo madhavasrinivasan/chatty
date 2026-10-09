@@ -35,6 +35,7 @@ async def init_db():
     await _upgrade_ecom_store_comez_fields()
     await _upgrade_background_tasks_columns()
     await _upgrade_billing_tables()
+    await _upgrade_tickets_table()
 
     # Safe for prod: create missing tables without wiping data.
     # store_knowledge vector/tsvector columns come from SQL
@@ -88,6 +89,37 @@ async def _upgrade_billing_tables():
         print("✅ billing tables ensured (wallets, wallet_transactions, demo_leads)")
     except Exception as e:
         print(f"⚠️ billing tables upgrade skipped or failed: {e}")
+
+
+async def _upgrade_tickets_table():
+    """Create tickets_raised table if missing."""
+    try:
+        conn = connections.get("default")
+        await conn.execute_script(
+            """
+            CREATE TABLE IF NOT EXISTS tickets_raised (
+                id serial PRIMARY KEY,
+                user_id integer NOT NULL,
+                chatbot_id integer,
+                ticket_id varchar(255) NOT NULL,
+                ticket_subject varchar(255),
+                user_email varchar(255) NOT NULL,
+                user_name varchar(255),
+                user_phone varchar(255) NOT NULL,
+                user_address text,
+                ticket_description text NOT NULL,
+                ticket_status varchar(50) NOT NULL DEFAULT 'open',
+                ticket_created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                ticket_updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_tickets_raised_user_id ON tickets_raised (user_id);
+            CREATE INDEX IF NOT EXISTS idx_tickets_raised_ticket_id ON tickets_raised (ticket_id);
+            CREATE INDEX IF NOT EXISTS idx_tickets_raised_status ON tickets_raised (ticket_status);
+            """
+        )
+        print("✅ tickets_raised table ensured")
+    except Exception as e:
+        print(f"⚠️ tickets_raised table upgrade skipped or failed: {e}")
 
 
 async def _upgrade_ecom_store_comez_fields():

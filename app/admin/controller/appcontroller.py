@@ -12,6 +12,7 @@ from fastapi import Request
 from Crypto.Random import get_random_bytes
 from typing import List, Optional
 import asyncio
+import uuid
 from app.core.config import db as db_config
 from app.core.config.db import initialize_light_rag
 from lightrag import QueryParam
@@ -38,7 +39,7 @@ from app.core.services.token_tracker import merge_token_usage_payload
 from app.core.services.shopify_return_service import ShopifyReturnService
 from jose import jwt as jose_jwt
 from jose.exceptions import JWTError
-from app.core.models.models import ecom_store, store_knowledge, chatbot_settings, ChatTranscript, ChatSession, ChatMessage
+from app.core.models.models import ecom_store, store_knowledge, chatbot_settings, ChatTranscript, ChatSession, ChatMessage, TicketsRaised
 import bcrypt
 import re
 import base64
@@ -1016,6 +1017,27 @@ class  AppController:
             result["final_response"] = final.model_dump()
 
 
+        # If user asks to add an item to cart or apply a discount referencing previously shown items:
+        cart_discount_keywords = (
+            "add to cart", "add to my cart", "add it to cart", "add this to cart",
+            "add the first", "add the second", "add the 1st", "add the 2nd",
+            "apply coupon", "apply discount", "apply code", "use coupon", "use discount",
+            "put in cart", "put in my cart",
+        )
+        msg_lower = (request.message or "").lower()
+        has_cart_intent = any(k in msg_lower for k in cart_discount_keywords)
+
+        if result.get("route") == "GENERAL_CHAT" and has_cart_intent:
+            prev_products = []
+            for prev in reversed(chat_history):
+                if isinstance(prev, dict) and prev.get("role") == "assistant" and prev.get("products"):
+                    prev_products = prev.get("products")
+                    break
+            if prev_products:
+                result["route"] = "HYBRID_SEARCH"
+                result["search_results"] = prev_products
+                print(f"🛒 Promoted GENERAL_CHAT -> HYBRID_SEARCH for cart action using {len(prev_products)} previous products")
+
         if result.get("route") == "GENERAL_CHAT":
             conversational = result.get("conversational_response") or ""
             final = FinalFrontendResponse(
@@ -1121,10 +1143,10 @@ class  AppController:
         ):
             try:
                 _t_db_start = _time.perf_counter()
-                if result.get("route") == "CATALOG_AGENT" and result.get("search_results") is not None:
+                if result.get("search_results") is not None:
                     rows = result.get("search_results") or []
                     print(
-                        f"  ⏱️ [CTRL] CATALOG_AGENT tool hits: {_time.perf_counter() - _t_db_start:.2f}s  |  "
+                        f"  ⏱️ [CTRL] Using existing search_results: {_time.perf_counter() - _t_db_start:.2f}s  |  "
                         f"{len(rows)} rows  |  trace={result.get('tool_trace')}"
                     )
                 elif result.get("search_payload"):
@@ -2002,5 +2024,127 @@ class  AppController:
             success=True,
             message="Dashboard stats fetched",
             data=stats,
+        )
+
+    @staticmethod
+    async def create_ticket(user: dict, body) -> APIResponse:
+        """
+        Widget / Customer: create a new support ticket.
+        Auth: x-api-key / chatty-api-key (storefront session).
+        """
+        email = getattr(body, "email", "") or ""
+        whatsapp_no = getattr(body, "whatsapp_number", "") or ""
+        issue = getattr(body, "issue", "") or ""
+        name = getattr(body, "name", None)
+        subject = getattr(body, "subject", None)
+
+        if not email.strip():
+            raise ApplicationError.BadRequest("Email is required")
+        if not whatsapp_no.strip():
+            raise ApplicationError.BadRequest("WhatsApp number is required")
+        if not issue.strip():
+            raise ApplicationError.BadRequest("Issue description is required")
+
+        ticket_code = f"TCK-{uuid.uuid4().hex[:6].upper()}"
+
+        ticket = await TicketsRaised.create(
+            user_id=user["id"],
+            chatbot_id=user.get("chatbot_id"),
+            ticket_id=ticket_code,
+            ticket_subject=subject.strip() if subject else "Support Request",
+            user_email=email.strip(),
+            user_name=name.strip() if name else None,
+            user_phone=whatsapp_no.strip(),
+            ticket_description=issue.strip(),
+            ticket_status="open",
+        )
+
+        return APIResponse(
+            success=True,
+            message="Ticket raised successfully",
+            data={
+                "id": ticket.id,
+                "ticket_id": ticket.ticket_id,
+                "email": ticket.user_email,
+                "whatsapp_number": ticket.user_phone,
+                "status": ticket.ticket_status,
+                "created_at": ticket.ticket_created_at.isoformat() if ticket.ticket_created_at else None,
+            },
+        )
+
+    @staticmethod
+    async def get_tickets(user: dict, status: Optional[str] = None, search: Optional[str] = None) -> APIResponse:
+        """
+        Admin: list all support tickets for the merchant, with status and search filters.
+        """
+        query = TicketsRaised.filter(user_id=user["id"])
+        if status and status.lower() not in ("all", ""):
+            query = query.filter(ticket_status__iexact=status.strip())
+
+        tickets = await query.order_by("-ticket_created_at")
+
+        if search and search.strip():
+            s = search.strip().lower()
+            tickets = [
+                t for t in tickets
+                if s in (t.ticket_id or "").lower()
+                or s in (t.user_email or "").lower()
+                or s in (t.user_phone or "").lower()
+                or s in (t.ticket_description or "").lower()
+                or s in (t.user_name or "").lower()
+                or s in (t.ticket_subject or "").lower()
+            ]
+
+        data = [
+            {
+                "id": t.id,
+                "ticket_id": t.ticket_id,
+                "subject": t.ticket_subject or "Support Request",
+                "email": t.user_email,
+                "name": t.user_name,
+                "whatsapp_number": t.user_phone,
+                "issue": t.ticket_description,
+                "status": (t.ticket_status or "open").lower(),
+                "created_at": t.ticket_created_at.isoformat() if t.ticket_created_at else None,
+                "updated_at": t.ticket_updated_at.isoformat() if t.ticket_updated_at else None,
+            }
+            for t in tickets
+        ]
+        return APIResponse(
+            success=True,
+            message="Tickets fetched successfully",
+            data=data,
+        )
+
+    @staticmethod
+    async def update_ticket_status(user: dict, ticket_id: str, new_status: str) -> APIResponse:
+        """
+        Admin: update ticket status (e.g. open, in_progress, resolved, closed).
+        """
+        if not new_status or not new_status.strip():
+            raise ApplicationError.BadRequest("Status is required")
+
+        ticket = await TicketsRaised.filter(user_id=user["id"], ticket_id=ticket_id.strip()).first()
+        if not ticket:
+            try:
+                ticket = await TicketsRaised.filter(user_id=user["id"], id=int(ticket_id)).first()
+            except ValueError:
+                pass
+
+        if not ticket:
+            raise ApplicationError.NotFound("Ticket not found")
+
+        ticket.ticket_status = new_status.strip().lower()
+        await ticket.save()
+
+        return APIResponse(
+            success=True,
+            message="Ticket status updated successfully",
+            data={
+                "id": ticket.id,
+                "ticket_id": ticket.ticket_id,
+                "status": ticket.ticket_status,
+                "updated_at": ticket.ticket_updated_at.isoformat() if ticket.ticket_updated_at else None,
+            },
         )
         

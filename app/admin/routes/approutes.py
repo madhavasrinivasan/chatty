@@ -8,6 +8,7 @@ from app.core.schema.schema import (
     LoadFirstConvoRequest, LoadFirstConvoResponse,
     ChatbotCustomizationResponse, ChatbotCustomizationUpdate, KnowledgeSummary,
     AddToCartTrackRequest, DemoLeadRequest,
+    CreateTicketRequest, UpdateTicketStatusRequest,
 )
 from app.core.schema.schema import llmrequest, llmresponse
 from app.core.services.first_conversation import generate_first_conversation_greeting
@@ -771,8 +772,40 @@ async def get_public_chatbot_customization(
 async def get_sync_summary(user: dict = Depends(AppController.validate_user)):
     return await AppController.get_sync_summary(user)
 
-# @adminapprouter.post("/getproducts",response_model=APIResponse)
-# async def get_products(request:Request,user:dict)
+
+@adminapprouter.post("/ticket", response_model=APIResponse)
+async def create_support_ticket(
+    body: CreateTicketRequest,
+    user: dict = Depends(AppController.validate_chatbot_api_key),
+):
+    """
+    Widget: Raise a customer support ticket (email, whatsapp_number, issue).
+    Auth: x-api-key / chatty-api-key.
+    """
+    return await AppController.create_ticket(user, body)
 
 
+@adminapprouter.get("/tickets", response_model=APIResponse)
+async def get_support_tickets(
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    user: dict = Depends(AppController.validate_user),
+):
+    """
+    Admin: Fetch all support tickets for this merchant store.
+    Auth: adminauthtoken.
+    """
+    return await AppController.get_tickets(user, status=status, search=search)
 
+
+@adminapprouter.patch("/tickets/{ticket_id}/status", response_model=APIResponse)
+async def update_support_ticket_status(
+    ticket_id: str,
+    body: UpdateTicketStatusRequest,
+    user: dict = Depends(AppController.validate_user),
+):
+    """
+    Admin: Update support ticket status (open, in_progress, resolved, closed).
+    Auth: adminauthtoken.
+    """
+    return await AppController.update_ticket_status(user, ticket_id=ticket_id, new_status=body.status)
