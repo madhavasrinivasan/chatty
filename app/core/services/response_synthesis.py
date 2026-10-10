@@ -393,6 +393,7 @@ async def generate_final_response(
     active_chat_history: list[dict[str, Any]] | None = None,
     cart_items: list[dict[str, Any]] | None = None,
     thinking_budget: int | None = None,
+    system_prompt_override: str | None = None,
 ) -> tuple[FinalFrontendResponse, dict[str, dict[str, int]]]:
     """
     Top-to-bottom flow:
@@ -480,6 +481,8 @@ async def generate_final_response(
         "the search results, you MUST include that product in selected_products using the exact `id` field from the results "
         "(string). Never put product image_url values into urls; urls is only for policy/sizing/collection page links.\n\n"
     )
+    if system_prompt_override and system_prompt_override.strip():
+        instruction += f"MERCHANT STORE CUSTOM RULES & INSTRUCTIONS (strictly respect and adhere to these guidelines):\n{system_prompt_override.strip()}\n\n"
     prompt = f"""{instruction}{memory_block}Current user question: "{user_query}".
 
 Search results from our catalog (use these to answer and to pick products):

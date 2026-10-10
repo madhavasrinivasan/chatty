@@ -7,6 +7,9 @@ from langchain_community.document_loaders import PyPDFLoader
 from app.core.schema.schema import llmresponse
 from fastapi import Request
 from datetime import datetime
+import httpx
+import base64
+import io
 from google import genai
 from google.genai import types
 from app.core.config.db import initialize_light_rag
@@ -167,12 +170,15 @@ class Services():
     async def generate_embedding(text: str):
         # google-genai embed_content is sync — must not run on the event loop or
         # one slow/hung embed freezes *all* FastAPI requests (looks like timeouts).
-        def _embed():
+        embedding_model = getattr(settings, "gemini_embedding_model", "gemini-embedding-2-preview") or "gemini-embedding-2-preview"
+        dim = int(getattr(settings, "gemini_embedding_dimension", 768) or 768)
+
+        def _embed(model_name: str):
             response = _get_client().models.embed_content(
-                model="gemini-embedding-001",
+                model=model_name,
                 contents=[text],
                 config=types.EmbedContentConfig(
-                    task_type="RETRIEVAL_QUERY", output_dimensionality=768
+                    task_type="RETRIEVAL_QUERY", output_dimensionality=dim
                 ),
             )
             if not response.embeddings:
@@ -181,7 +187,13 @@ class Services():
             return list(emb.values) if hasattr(emb, "values") else []
 
         try:
-            return await asyncio.wait_for(asyncio.to_thread(_embed), timeout=15.0)
+            try:
+                return await asyncio.wait_for(asyncio.to_thread(_embed, embedding_model), timeout=15.0)
+            except Exception as primary_err:
+                if embedding_model != "gemini-embedding-001":
+                    print(f"⚠️ Primary embed model '{embedding_model}' error ({primary_err}), falling back to gemini-embedding-001", flush=True)
+                    return await asyncio.wait_for(asyncio.to_thread(_embed, "gemini-embedding-001"), timeout=15.0)
+                raise primary_err
         except asyncio.TimeoutError:
             print("generate_embedding timed out after 15s", flush=True)
             return []
@@ -189,26 +201,115 @@ class Services():
             print(f"generate_embedding error: {e}", flush=True)
             return []
 
-    
+    @staticmethod
+    async def generate_multimodal_embedding(
+        text: str = "",
+        image_bytes: bytes | None = None,
+        image_url: str | None = None,
+        mime_type: str = "image/jpeg",
+        task_type: str = "RETRIEVAL_QUERY",
+    ):
+        """
+        Generates a unified multimodal embedding from text and/or an image using Gemini Embedding 2.
+        Supports:
+          - Image only: visual similarity search ("Find me something like this").
+          - Text only: semantic search ("red floral summer dress").
+          - Multimodal (Image + Text): compound query (e.g. photo + "in blue color under $50").
+        """
+        embedding_model = getattr(settings, "gemini_embedding_model", "gemini-embedding-2-preview") or "gemini-embedding-2-preview"
+        dim = int(getattr(settings, "gemini_embedding_dimension", 768) or 768)
+
+        # 1. Download image bytes if given an image URL
+        if not image_bytes and image_url:
+            try:
+                # If Shopify CDN, append ?width=300 to download small thumbnail fast
+                fetch_url = image_url
+                if "cdn.shopify.com" in fetch_url and "?" not in fetch_url:
+                    fetch_url = f"{fetch_url}?width=300"
+                async with httpx.AsyncClient(timeout=4.0) as client:
+                    resp = await client.get(fetch_url)
+                    if resp.status_code == 200:
+                        image_bytes = resp.content
+                        content_type = resp.headers.get("content-type", "")
+                        if "png" in content_type:
+                            mime_type = "image/png"
+                        elif "webp" in content_type:
+                            mime_type = "image/webp"
+                        else:
+                            mime_type = "image/jpeg"
+            except Exception as dl_err:
+                print(f"⚠️ Could not download image for multimodal embedding ({image_url}): {dl_err}", flush=True)
+
+        # 2. Build contents list
+        contents = []
+        if text and text.strip():
+            contents.append(text.strip())
+        if image_bytes:
+            contents.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+
+        if not contents:
+            return []
+
+        # If no image was acquired, fall back to text embedding
+        if not image_bytes:
+            return await Services.generate_embedding(text)
+
+        def _embed_multimodal(model_name: str):
+            response = _get_client().models.embed_content(
+                model=model_name,
+                contents=contents,
+                config=types.EmbedContentConfig(
+                    task_type=task_type,
+                    output_dimensionality=dim,
+                ),
+            )
+            if not response.embeddings:
+                return []
+            emb = response.embeddings[0]
+            return list(emb.values) if hasattr(emb, "values") else []
+
+        try:
+            try:
+                return await asyncio.wait_for(asyncio.to_thread(_embed_multimodal, embedding_model), timeout=15.0)
+            except Exception as primary_err:
+                print(f"⚠️ Multimodal embed failed on '{embedding_model}' ({primary_err}); falling back to text", flush=True)
+                if text:
+                    return await Services.generate_embedding(text)
+                return []
+        except Exception as e:
+            print(f"generate_multimodal_embedding error: {e}", flush=True)
+            if text:
+                return await Services.generate_embedding(text)
+            return []
+
     @staticmethod
     async def generate_batch_embeddings(texts: list[str]):
         # 1. Handle empty lists to avoid API errors
         if not texts:
             return []
 
-        def _embed_batch():
+        embedding_model = getattr(settings, "gemini_embedding_model", "gemini-embedding-2-preview") or "gemini-embedding-2-preview"
+        dim = int(getattr(settings, "gemini_embedding_dimension", 768) or 768)
+
+        def _embed_batch(model_name: str):
             response = _get_client().models.embed_content(
-                model="gemini-embedding-001",
+                model=model_name,
                 contents=texts,
                 config=types.EmbedContentConfig(
                     task_type="RETRIEVAL_DOCUMENT",
-                    output_dimensionality=768,
+                    output_dimensionality=dim,
                 ),
             )
             return [e.values for e in (response.embeddings or [])]
 
         try:
-            return await asyncio.wait_for(asyncio.to_thread(_embed_batch), timeout=60.0)
+            try:
+                return await asyncio.wait_for(asyncio.to_thread(_embed_batch, embedding_model), timeout=60.0)
+            except Exception as primary_err:
+                if embedding_model != "gemini-embedding-001":
+                    print(f"⚠️ Batch embed '{embedding_model}' error ({primary_err}), falling back to gemini-embedding-001", flush=True)
+                    return await asyncio.wait_for(asyncio.to_thread(_embed_batch, "gemini-embedding-001"), timeout=60.0)
+                raise primary_err
         except asyncio.TimeoutError:
             print("generate_batch_embeddings timed out", flush=True)
             return []
@@ -217,10 +318,20 @@ class Services():
             return []
 
     @staticmethod
-    async def vectiriseproductblob(content_blob_array: list):
+    async def vectiriseproductblob(products_or_blobs: list):
+        """
+        Generates embeddings for a batch of products.
+        Accepts either:
+          - A list of product dicts (each having 'content' and optional 'image_url')
+          - A list of plain text strings
+        """
         try:
-           embeddings =  await Services.generate_batch_embeddings(content_blob_array); 
-           return embeddings
+            if not products_or_blobs:
+                return []
+            if isinstance(products_or_blobs[0], str):
+                return await Services.generate_batch_embeddings(products_or_blobs)
+            texts = [p.get("content", "") for p in products_or_blobs]
+            return await Services.generate_batch_embeddings(texts)
         except Exception as e:
             print(f"Error vectorizing product blob: {e}")
             raise ApplicationError.InternalServerError("Cannot vectorize product blob")

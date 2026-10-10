@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     # Models per stage. flash = higher quality; flash-lite = faster but lower quality.
     gemini_router_model: str = Field(default="gemini-2.5-flash")
     gemini_synthesis_model: str = Field(default="gemini-2.5-flash")
+    gemini_embedding_model: str = Field(default="gemini-embedding-2-preview")
+    gemini_embedding_dimension: int = Field(default=768)
     # Thinking budget per stage: 0 = thinking OFF (fastest), -1 = dynamic thinking
     # (model decides, slowest but highest quality), N = fixed token budget.
     # Both default OFF for lowest latency; bump synthesis to -1 or N for richer answers.

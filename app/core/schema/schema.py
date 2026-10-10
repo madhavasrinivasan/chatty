@@ -112,6 +112,8 @@ class OrchestratorRequest(BaseModel):
     cart_token: Optional[str] = Field(default=None, description="Shopify cart token.")
     cart_total: Optional[float] = Field(default=None, description="Shopify cart total price.")
     cart_items: Optional[List[Any]] = Field(default_factory=list, description="Shopify cart items.")
+    image_url: Optional[str] = Field(default=None, description="Optional image URL uploaded by the user for visual search.")
+    image_base64: Optional[str] = Field(default=None, description="Optional base64 image data uploaded by the user for visual search.")
 
 
 class LoadFirstConvoRequest(BaseModel):

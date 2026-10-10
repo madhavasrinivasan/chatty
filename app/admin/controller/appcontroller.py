@@ -993,6 +993,20 @@ class  AppController:
         print(f"  ⏱️ [CTRL] Unified Router+Expander (LLM #1): {_t2 - _t1:.2f}s  |  route={result.get('route')}")
         print(f"Result: {result}")
 
+        user_has_image = bool(request.image_url or request.image_base64)
+        if user_has_image:
+            result["route"] = "HYBRID_SEARCH"
+            if not result.get("search_payload"):
+                result["search_payload"] = {
+                    "semantic_context": request.message or "find products similar to this image",
+                    "keywords": (request.message or "").strip(),
+                    "filters": {},
+                    "sort": {},
+                    "search_scope": "products",
+                }
+            result["search_payload"]["query_image_url"] = request.image_url
+            result["search_payload"]["query_image_base64"] = request.image_base64
+            print(f"🖼️ [CTRL] User uploaded image detected -> promoted to HYBRID_SEARCH with query_image", flush=True)
 
         if result.get("route") == "ORDER_SUPPORT":
             order_status_payload = result.get("order_status")
@@ -1209,8 +1223,10 @@ class  AppController:
                     try:
                         custom = await AdminDbContoller().get_chatbot_customization(store_id)
                         extended_thinking = bool(getattr(custom, "extended_thinking", False))
+                        system_prompt_override = getattr(custom, "system_prompt_override", None)
                     except Exception:
                         extended_thinking = False
+                        system_prompt_override = None
 
                     max_retries = int(getattr(settings, "extended_thinking_max_retries", 3) or 3)
                     synth_budget = (
@@ -1227,8 +1243,11 @@ class  AppController:
 
                     while True:
                         _t_synth_start = _time.perf_counter()
+                        synth_query = (request.message or "").strip()
+                        if user_has_image:
+                            synth_query = f"{synth_query} [User uploaded a photo to find visually matching products]".strip() if synth_query else "Find products matching the uploaded photo"
                         final, synth_usage = await generate_final_response(
-                            user_query=request.message or "",
+                            user_query=synth_query,
                             hybrid_results=rows,
                             shop_domain=store.store_name if store else "",
                             db_session=None,
@@ -1240,6 +1259,7 @@ class  AppController:
                             active_chat_history=chat_history,
                             cart_items=request.cart_items,
                             thinking_budget=synth_budget,
+                            system_prompt_override=system_prompt_override,
                         )
                         agent_order = result.get("order_status")
                         if isinstance(agent_order, dict) and agent_order.get("found"):

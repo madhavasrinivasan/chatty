@@ -604,6 +604,8 @@ async def process_orchestrate_chatbot(
         cart_token=cart_token,
         cart_total=cart_total,
         cart_items=cart_items,
+        image_url=body.image_url,
+        image_base64=body.image_base64,
     )
 
 
@@ -715,7 +717,8 @@ async def update_chatbot_customization(
     if button_icon_style is not None: body_data["button_icon_style"] = button_icon_style
     if send_button_color is not None: body_data["send_button_color"] = send_button_color
     if other_color is not None: body_data["other_color"] = other_color
-    if system_prompt_override is not None: body_data["system_prompt_override"] = system_prompt_override
+    if system_prompt_override is not None:
+        body_data["system_prompt_override"] = system_prompt_override.strip() if system_prompt_override.strip() else None
     if extended_thinking is not None:
         body_data["extended_thinking"] = str(extended_thinking).strip().lower() in (
             "1",
@@ -727,12 +730,12 @@ async def update_chatbot_customization(
     if logo_path:
         body_data["logo_url"] = logo_path
     elif logo_url is not None:
-        body_data["logo_url"] = logo_url
+        body_data["logo_url"] = logo_url.strip() if logo_url.strip() and logo_url.strip().lower() != "null" else None
 
     if avatar_path:
         body_data["avatar_url"] = avatar_path
     elif avatar_url is not None:
-        body_data["avatar_url"] = avatar_url
+        body_data["avatar_url"] = avatar_url.strip() if avatar_url.strip() and avatar_url.strip().lower() != "null" else None
 
     if sample_questions is not None:
         try:

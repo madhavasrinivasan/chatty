@@ -7,6 +7,7 @@ DatabaseExecutor: runs search against store_knowledge using QueryExpander payloa
 from __future__ import annotations
 
 import json
+import base64
 from typing import Any
 
 from tortoise import connections
@@ -434,11 +435,25 @@ class DatabaseExecutor:
         if search_scope in ("knowledge", "pages", "policy", "faq") and not search_keywords:
             search_keywords = (semantic_context or "shipping policy FAQ").strip()[:120]
 
+        # Multimodal image query handling (from uploaded photo / URL)
+        query_image_bytes = payload.get("query_image_bytes")
+        query_image_url = payload.get("query_image_url")
+        query_image_b64 = payload.get("query_image_base64")
+        if not query_image_bytes and query_image_b64:
+            try:
+                if "," in str(query_image_b64):
+                    query_image_b64 = str(query_image_b64).split(",", 1)[1]
+                query_image_bytes = base64.b64decode(query_image_b64)
+            except Exception as b64_err:
+                print(f"⚠️ Failed decoding query_image_base64: {b64_err}", flush=True)
+
+        has_image = bool(query_image_bytes or query_image_url)
+
         conn = connections.get("default")
 
         # Branch A: Catalog browse — products only (cheapest / browse)
-        # Allow browse with only price/collection filters and no keywords.
-        if not search_keywords and search_scope not in ("knowledge", "pages", "policy", "faq", "all", "both"):
+        # Allow browse with only price/collection filters and no keywords (and no query image).
+        if not search_keywords and not has_image and search_scope not in ("knowledge", "pages", "policy", "faq", "all", "both"):
             try:
                 sql, params = _build_catalog_browse_sql(
                     store_id, sort_column, sort_order, limit, filters=filters
@@ -477,9 +492,9 @@ class DatabaseExecutor:
             rows = await conn.execute_query_dict(sql, params)
             return [dict(r) for r in rows] if rows else []
 
-        # Branch B: Keyword only — no semantic_context. No embedding API.
+        # Branch B: Keyword only — no semantic_context and no image. No embedding API.
         # Also used for constrained price/collection queries.
-        if not semantic_context and search_keywords:
+        if not semantic_context and not has_image and search_keywords:
             try:
                 rows = await _run_keyword(search_keywords, filters)
                 print(
@@ -512,20 +527,40 @@ class DatabaseExecutor:
                 print(f"DatabaseExecutor Branch B (keyword) error: {e}", flush=True)
                 return []
 
-        # Branch C: Full hybrid — has semantic_context. Call embedding API then RRF with DISTINCT ON.
+        # Branch C: Full hybrid / Multimodal — has semantic_context or has_image.
+        rrf = payload.get("rrf_weights") or {}
+        vector_weight = float(rrf.get("vector_weight", 0.5))
+        keyword_weight = float(rrf.get("keyword_weight", 0.5))
+
         try:
-            embedding = await Services.generate_embedding(semantic_context)
+            if has_image:
+                print(f"🖼️ DatabaseExecutor generating multimodal embedding (has_image=True, text={semantic_context!r})", flush=True)
+                embedding = await Services.generate_multimodal_embedding(
+                    text=semantic_context or "",
+                    image_bytes=query_image_bytes,
+                    image_url=query_image_url,
+                    task_type="RETRIEVAL_QUERY",
+                )
+                # Pure image search with no text/keywords: lean 100% on the visual vector!
+                if not semantic_context and not search_keywords:
+                    vector_weight = 1.0
+                    keyword_weight = 0.0
+                elif not rrf:
+                    # Hybrid with image: 75% visual/semantic vector, 25% keyword match
+                    vector_weight = 0.75
+                    keyword_weight = 0.25
+            else:
+                embedding = await Services.generate_embedding(semantic_context)
+
             if embedding is not None and not isinstance(embedding, list):
                 embedding = list(embedding)
             vector_json = json.dumps(embedding or [])
         except Exception as e:
             print(f"DatabaseExecutor embedding error: {e}", flush=True)
             return []
-        rrf = payload.get("rrf_weights") or {}
-        vector_weight = float(rrf.get("vector_weight", 0.5))
-        keyword_weight = float(rrf.get("keyword_weight", 0.5))
+
         # Knowledge defaults lean keyword if caller omitted weights
-        if search_scope in ("knowledge", "pages", "policy", "faq") and not rrf:
+        if search_scope in ("knowledge", "pages", "policy", "faq") and not rrf and not has_image:
             keyword_weight, vector_weight = 0.6, 0.4
         total = vector_weight + keyword_weight
         if total <= 0:
