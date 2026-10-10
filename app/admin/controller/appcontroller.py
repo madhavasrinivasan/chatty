@@ -996,17 +996,34 @@ class  AppController:
         user_has_image = bool(request.image_url or request.image_base64)
         if user_has_image:
             result["route"] = "HYBRID_SEARCH"
-            if not result.get("search_payload"):
-                result["search_payload"] = {
-                    "semantic_context": request.message or "find products similar to this image",
-                    "keywords": (request.message or "").strip(),
-                    "filters": {},
-                    "sort": {},
-                    "search_scope": "products",
-                }
-            result["search_payload"]["query_image_url"] = request.image_url
-            result["search_payload"]["query_image_base64"] = request.image_base64
-            print(f"🖼️ [CTRL] User uploaded image detected -> promoted to HYBRID_SEARCH with query_image", flush=True)
+            sp = result.setdefault("search_payload", {})
+            sp["query_image_url"] = request.image_url
+            sp["query_image_base64"] = request.image_base64
+            sp["search_scope"] = "products"
+
+            user_msg = (request.message or "").strip()
+            generic_phrases = {
+                "", "find this", "find this product", "find this item", "search this",
+                "search this product", "similar to this", "like this", "what is this",
+                "find", "search", "show me this", "can you find this", "look for this",
+                "find similar", "find matching", "is this available",
+            }
+            is_generic = user_msg.lower().strip(".,!?:") in generic_phrases
+
+            if is_generic:
+                # Pure visual search: do NOT let stale chat history keywords (e.g. muslin from 5 turns ago) pollute the search!
+                sp["semantic_context"] = ""
+                sp["search_keywords"] = ""
+                sp["keywords"] = ""
+                sp["rrf_weights"] = {"vector_weight": 1.0, "keyword_weight": 0.0}
+            else:
+                # User provided a specific modifier for this photo (e.g. "in pink", "under 1000")
+                sp["semantic_context"] = user_msg
+                sp["search_keywords"] = user_msg
+                sp["keywords"] = user_msg
+                sp["rrf_weights"] = {"vector_weight": 0.85, "keyword_weight": 0.15}
+
+            print(f"🖼️ [CTRL] User uploaded image detected -> promoted to HYBRID_SEARCH with query_image (is_generic={is_generic})", flush=True)
 
         if result.get("route") == "ORDER_SUPPORT":
             order_status_payload = result.get("order_status")
