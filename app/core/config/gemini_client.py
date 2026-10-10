@@ -192,15 +192,14 @@ async def call_vertex_embed_content(
     # Match location to model ID:
     # On Vertex AI:
     #   us-central1 hosts "gemini-embedding-2-preview"
-    #   global hosts "gemini-embedding-2"
+    # Match location to model ID:
+    # On Vertex AI:
+    #   global hosts "gemini-embedding-2" (has separate quota, recommended)
+    #   us-central1 hosts "gemini-embedding-2-preview"
     targets: list[tuple[str, str]] = []
     if "gemini-embedding-2" in model:
-        if configured_loc == "us-central1":
-            targets.append(("us-central1", "gemini-embedding-2-preview"))
-            targets.append(("global", "gemini-embedding-2"))
-        else:
-            targets.append((configured_loc, "gemini-embedding-2"))
-            targets.append(("us-central1", "gemini-embedding-2-preview"))
+        targets.append(("global", "gemini-embedding-2"))
+        targets.append(("us-central1", "gemini-embedding-2-preview"))
     else:
         targets.append((configured_loc, model))
         if configured_loc != "global":
@@ -211,6 +210,7 @@ async def call_vertex_embed_content(
         "Content-Type": "application/json",
     }
 
+    last_error = ""
     async with httpx.AsyncClient(timeout=15.0) as client:
         for current_loc, target_model in targets:
             base_url = "https://aiplatform.googleapis.com" if current_loc == "global" else f"https://{current_loc}-aiplatform.googleapis.com"
@@ -223,11 +223,14 @@ async def call_vertex_embed_content(
                     if values:
                         return values
                 else:
-                    print(f"⚠️ Vertex :embedContent ({current_loc}, {target_model}, status {resp.status_code}): {resp.text[:250]}", flush=True)
+                    last_error = f"{current_loc}/{target_model} status {resp.status_code}: {resp.text[:150]}"
             except Exception as req_err:
-                print(f"⚠️ Vertex :embedContent network error on ({current_loc}, {target_model}): {req_err}", flush=True)
+                last_error = f"{current_loc}/{target_model} network error: {req_err}"
 
+    if last_error:
+        print(f"⚠️ Vertex :embedContent failed across targets: {last_error}", flush=True)
     return None
+
 
 
 
