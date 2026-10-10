@@ -535,20 +535,26 @@ class DatabaseExecutor:
         try:
             if has_image:
                 print(f"🖼️ DatabaseExecutor generating multimodal embedding (has_image=True, text={semantic_context!r})", flush=True)
+                # Seed search_keywords from visual tagging if shopper did not type text keywords
+                if not search_keywords and (query_image_bytes or query_image_url):
+                    img_b, mime = await Services.resolve_image_bytes(query_image_bytes, query_image_url)
+                    if img_b:
+                        v_kw = await Services.describe_image_visually(img_b, mime)
+                        if v_kw:
+                            search_keywords = v_kw
+                            semantic_context = f"{v_kw} {semantic_context}".strip() if semantic_context else v_kw
+                            print(f"🏷️ Seeded visual search keywords into BM25: {search_keywords!r}", flush=True)
+
                 embedding = await Services.generate_multimodal_embedding(
                     text=semantic_context or "",
                     image_bytes=query_image_bytes,
                     image_url=query_image_url,
                     task_type="RETRIEVAL_QUERY",
                 )
-                # Pure image search with no text/keywords: lean 100% on the visual vector!
-                if not semantic_context and not search_keywords:
-                    vector_weight = 1.0
-                    keyword_weight = 0.0
-                elif not rrf:
-                    # Hybrid with image: 75% visual/semantic vector, 25% keyword match
-                    vector_weight = 0.75
-                    keyword_weight = 0.25
+                if not rrf:
+                    # Hybrid with image: 70% visual vector, 30% keyword match
+                    vector_weight = 0.70
+                    keyword_weight = 0.30
             else:
                 embedding = await Services.generate_embedding(semantic_context)
 

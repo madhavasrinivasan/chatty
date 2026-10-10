@@ -170,7 +170,7 @@ class Services():
     async def generate_embedding(text: str):
         # google-genai embed_content is sync — must not run on the event loop or
         # one slow/hung embed freezes *all* FastAPI requests (looks like timeouts).
-        embedding_model = getattr(settings, "gemini_embedding_model", "gemini-embedding-2-preview") or "gemini-embedding-2-preview"
+        embedding_model = getattr(settings, "gemini_embedding_model", "gemini-embedding-2") or "gemini-embedding-2"
         dim = int(getattr(settings, "gemini_embedding_dimension", 768) or 768)
 
         def _embed(model_name: str):
@@ -202,6 +202,74 @@ class Services():
             return []
 
     @staticmethod
+    async def describe_image_visually(
+        image_bytes: bytes,
+        mime_type: str = "image/jpeg",
+    ) -> str:
+        """
+        Use Gemini Flash Lite to generate rich e-commerce visual search keywords from an image.
+        This provides instant, zero-shot visual tagging to seed both the embedding and BM25 keywords.
+        """
+        try:
+            client = _get_client()
+            part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+            prompt = (
+                "You are an e-commerce visual search assistant. "
+                "Analyze this product image and output a concise 6 to 12 word description "
+                "of what is shown (product/garment category, color, material, pattern, and key distinguishing features). "
+                "Output ONLY the descriptive keywords separated by spaces, with no commentary or punctuation."
+            )
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=settings.gemini_router_model or "gemini-2.5-flash-lite",
+                contents=[part, prompt],
+            )
+            desc = (getattr(response, "text", "") or "").strip()
+            print(f"👁️ Visual tagging for photo: {desc!r}", flush=True)
+            return desc
+        except Exception as e:
+            print(f"⚠️ Visual tagging error: {e}", flush=True)
+            return ""
+
+    @staticmethod
+    async def resolve_image_bytes(
+        image_bytes: bytes | None = None,
+        image_url: str | None = None,
+    ) -> tuple[bytes | None, str]:
+        """
+        Resolves image bytes and mime type from either raw bytes or an HTTP URL.
+        Handles Shopify CDN thumbnail optimization (?width=300), redirects, and robust error handling.
+        """
+        if image_bytes:
+            return image_bytes, "image/jpeg"
+
+        if not image_url:
+            return None, "image/jpeg"
+
+        try:
+            fetch_url = image_url.strip()
+            if "cdn.shopify.com" in fetch_url and "?" not in fetch_url:
+                fetch_url = f"{fetch_url}?width=300"
+
+            async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+                resp = await client.get(fetch_url)
+                if resp.status_code == 200:
+                    content_type = resp.headers.get("content-type", "").lower()
+                    if "png" in content_type:
+                        mime_type = "image/png"
+                    elif "webp" in content_type:
+                        mime_type = "image/webp"
+                    else:
+                        mime_type = "image/jpeg"
+                    return resp.content, mime_type
+                else:
+                    print(f"⚠️ Failed downloading image ({resp.status_code}) from: {image_url}", flush=True)
+        except Exception as dl_err:
+            print(f"⚠️ Error resolving image bytes from {image_url}: {dl_err}", flush=True)
+
+        return None, "image/jpeg"
+
+    @staticmethod
     async def generate_multimodal_embedding(
         text: str = "",
         image_bytes: bytes | None = None,
@@ -216,29 +284,12 @@ class Services():
           - Text only: semantic search ("red floral summer dress").
           - Multimodal (Image + Text): compound query (e.g. photo + "in blue color under $50").
         """
-        embedding_model = getattr(settings, "gemini_embedding_model", "gemini-embedding-2-preview") or "gemini-embedding-2-preview"
+        embedding_model = getattr(settings, "gemini_embedding_model", "gemini-embedding-2") or "gemini-embedding-2"
         dim = int(getattr(settings, "gemini_embedding_dimension", 768) or 768)
 
-        # 1. Download image bytes if given an image URL
+        # 1. Download/resolve image bytes if given an image URL
         if not image_bytes and image_url:
-            try:
-                # If Shopify CDN, append ?width=300 to download small thumbnail fast
-                fetch_url = image_url
-                if "cdn.shopify.com" in fetch_url and "?" not in fetch_url:
-                    fetch_url = f"{fetch_url}?width=300"
-                async with httpx.AsyncClient(timeout=4.0) as client:
-                    resp = await client.get(fetch_url)
-                    if resp.status_code == 200:
-                        image_bytes = resp.content
-                        content_type = resp.headers.get("content-type", "")
-                        if "png" in content_type:
-                            mime_type = "image/png"
-                        elif "webp" in content_type:
-                            mime_type = "image/webp"
-                        else:
-                            mime_type = "image/jpeg"
-            except Exception as dl_err:
-                print(f"⚠️ Could not download image for multimodal embedding ({image_url}): {dl_err}", flush=True)
+            image_bytes, mime_type = await Services.resolve_image_bytes(None, image_url)
 
         # 2. Build contents list
         contents = []
@@ -254,6 +305,7 @@ class Services():
         if not image_bytes:
             return await Services.generate_embedding(text)
 
+        # 3. Try native multimodal embedding with gemini-embedding-2
         def _embed_multimodal(model_name: str):
             response = _get_client().models.embed_content(
                 model=model_name,
@@ -269,18 +321,23 @@ class Services():
             return list(emb.values) if hasattr(emb, "values") else []
 
         try:
-            try:
-                return await asyncio.wait_for(asyncio.to_thread(_embed_multimodal, embedding_model), timeout=15.0)
-            except Exception as primary_err:
-                print(f"⚠️ Multimodal embed failed on '{embedding_model}' ({primary_err}); falling back to text", flush=True)
-                if text:
-                    return await Services.generate_embedding(text)
-                return []
-        except Exception as e:
-            print(f"generate_multimodal_embedding error: {e}", flush=True)
-            if text:
-                return await Services.generate_embedding(text)
-            return []
+            emb = await asyncio.wait_for(asyncio.to_thread(_embed_multimodal, embedding_model), timeout=15.0)
+            if emb:
+                return emb
+        except Exception as primary_err:
+            print(f"⚠️ Native multimodal embed error on '{embedding_model}': {primary_err}", flush=True)
+
+        # 4. If SDK strips non-text parts or native call fails, use Gemini Flash Lite zero-shot visual tagging
+        if image_bytes:
+            visual_desc = await Services.describe_image_visually(image_bytes, mime_type)
+            combined_query = f"{visual_desc} {text}".strip() if text else visual_desc
+            if combined_query:
+                print(f"🔍 Generating embedding from visual description: {combined_query!r}", flush=True)
+                return await Services.generate_embedding(combined_query)
+
+        if text:
+            return await Services.generate_embedding(text)
+        return []
 
     @staticmethod
     async def generate_batch_embeddings(texts: list[str]):
@@ -288,7 +345,7 @@ class Services():
         if not texts:
             return []
 
-        embedding_model = getattr(settings, "gemini_embedding_model", "gemini-embedding-2-preview") or "gemini-embedding-2-preview"
+        embedding_model = getattr(settings, "gemini_embedding_model", "gemini-embedding-2") or "gemini-embedding-2"
         dim = int(getattr(settings, "gemini_embedding_dimension", 768) or 768)
 
         def _embed_batch(model_name: str):
@@ -300,7 +357,7 @@ class Services():
                     output_dimensionality=dim,
                 ),
             )
-            return [e.values for e in (response.embeddings or [])]
+            return [list(e.values) for e in (response.embeddings or [])]
 
         try:
             try:
