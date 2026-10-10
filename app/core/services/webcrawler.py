@@ -368,19 +368,39 @@ class Services():
         embedding_model = getattr(settings, "gemini_embedding_model", "gemini-embedding-2") or "gemini-embedding-2"
         dim = int(getattr(settings, "gemini_embedding_dimension", 768) or 768)
 
-        # Direct concurrent :embedContent calls for gemini-embedding-2
+        # Direct throttled :embedContent calls for gemini-embedding-2
         if "gemini-embedding-2" in embedding_model:
-            async def _single_embed(t: str):
-                return await call_vertex_embed_content(
-                    model=embedding_model,
-                    parts=[{"text": t}],
-                    output_dimensionality=dim,
-                )
-            results = await asyncio.gather(*[_single_embed(t) for t in texts], return_exceptions=True)
+            sem = asyncio.Semaphore(3)  # Cap concurrency to 3 to stay under Vertex burst limits
+
+            async def _single_embed_with_retry(t: str):
+                async with sem:
+                    for attempt in range(3):
+                        emb = await call_vertex_embed_content(
+                            model=embedding_model,
+                            parts=[{"text": t}],
+                            output_dimensionality=dim,
+                        )
+                        if emb:
+                            return emb
+                        # Backoff on failure (e.g. 429 rate limit)
+                        await asyncio.sleep(1.0 * (attempt + 1))
+                    return None
+
+            # Process in small chunks to respect requests-per-minute (RPM)
+            results = []
+            chunk_size = 6
+            for i in range(0, len(texts), chunk_size):
+                chunk = texts[i : i + chunk_size]
+                chunk_results = await asyncio.gather(*[_single_embed_with_retry(t) for t in chunk], return_exceptions=True)
+                results.extend(chunk_results)
+                if i + chunk_size < len(texts):
+                    await asyncio.sleep(0.3)
+
             valid_results = [r for r in results if isinstance(r, list) and r]
             if len(valid_results) == len(texts):
                 return valid_results
             print(f"⚠️ Batch direct embed had partial failures ({len(valid_results)}/{len(texts)}), falling back to SDK", flush=True)
+
 
         def _embed_batch(model_name: str):
             response = _get_embedding_client().models.embed_content(
