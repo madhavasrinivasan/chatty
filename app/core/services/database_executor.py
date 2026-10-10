@@ -544,6 +544,7 @@ class DatabaseExecutor:
                             search_keywords = v_kw
                             semantic_context = f"{v_kw} {semantic_context}".strip() if semantic_context else v_kw
                             print(f"🏷️ Seeded visual search keywords into BM25: {search_keywords!r}", flush=True)
+                        query_image_bytes = img_b
 
                 embedding = await Services.generate_multimodal_embedding(
                     text=semantic_context or "",

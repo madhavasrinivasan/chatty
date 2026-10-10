@@ -16,7 +16,11 @@ from app.core.config.db import initialize_light_rag
 from typing import List
 import json
 from app.core.config.config import settings
-from app.core.config.gemini_client import get_genai_client, get_genai_embedding_client
+from app.core.config.gemini_client import (
+    get_genai_client,
+    get_genai_embedding_client,
+    call_vertex_embed_content,
+)
 from app.core.schema.applicationerror import ApplicationError
 from app.core.models.dbontrollers.admindbcontroller import AdminDbContoller
 from app.core.schema.schema import StoreDNA
@@ -172,11 +176,27 @@ class Services():
 
     @staticmethod
     async def generate_embedding(text: str):
-        # google-genai embed_content is sync — must not run on the event loop or
-        # one slow/hung embed freezes *all* FastAPI requests (looks like timeouts).
+        if not text or not text.strip():
+            return []
+
         embedding_model = getattr(settings, "gemini_embedding_model", "gemini-embedding-2") or "gemini-embedding-2"
         dim = int(getattr(settings, "gemini_embedding_dimension", 768) or 768)
 
+        # 1. Primary: Use direct :embedContent REST endpoint (Vertex AI or AI Studio)
+        # Bypasses the SDK routing bug that mistakenly targets legacy :predict with 400 FAILED_PRECONDITION
+        if "gemini-embedding-2" in embedding_model:
+            try:
+                emb = await call_vertex_embed_content(
+                    model=embedding_model,
+                    parts=[{"text": text.strip()}],
+                    output_dimensionality=dim,
+                )
+                if emb:
+                    return emb
+            except Exception as direct_err:
+                print(f"⚠️ Direct :embedContent error for text on '{embedding_model}': {direct_err}", flush=True)
+
+        # 2. Fallback: Use standard SDK client with fallback to gemini-embedding-001
         def _embed(model_name: str):
             response = _get_embedding_client().models.embed_content(
                 model=model_name,
@@ -204,6 +224,7 @@ class Services():
         except Exception as e:
             print(f"generate_embedding error: {e}", flush=True)
             return []
+
 
     @staticmethod
     async def describe_image_visually(
@@ -295,43 +316,38 @@ class Services():
         if not image_bytes and image_url:
             image_bytes, mime_type = await Services.resolve_image_bytes(None, image_url)
 
-        # 2. Build contents list
-        contents = []
-        if text and text.strip():
-            contents.append(text.strip())
-        if image_bytes:
-            contents.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
-
-        if not contents:
-            return []
-
         # If no image was acquired, fall back to text embedding
         if not image_bytes:
             return await Services.generate_embedding(text)
 
-        # 3. Try native multimodal embedding with gemini-embedding-2
-        def _embed_multimodal(model_name: str):
-            response = _get_embedding_client().models.embed_content(
-                model=model_name,
-                contents=contents,
-                config=types.EmbedContentConfig(
-                    task_type=task_type,
-                    output_dimensionality=dim,
-                ),
-            )
-            if not response.embeddings:
-                return []
-            emb = response.embeddings[0]
-            return list(emb.values) if hasattr(emb, "values") else []
+        # 2. Build REST parts with base64 inlineData
+        parts = []
+        if text and text.strip():
+            parts.append({"text": text.strip()})
+        if image_bytes:
+            b64_data = base64.b64encode(image_bytes).decode("utf-8")
+            safe_mime = "image/png" if "png" in (mime_type or "").lower() else ("image/webp" if "webp" in (mime_type or "").lower() else "image/jpeg")
+            parts.append({
+                "inlineData": {
+                    "mimeType": safe_mime,
+                    "data": b64_data,
+                }
+            })
 
+        # 3. Direct :embedContent REST call (bypasses SDK stripping non-text parts and legacy :predict 400 error)
         try:
-            emb = await asyncio.wait_for(asyncio.to_thread(_embed_multimodal, embedding_model), timeout=15.0)
+            emb = await call_vertex_embed_content(
+                model=embedding_model,
+                parts=parts,
+                output_dimensionality=dim,
+            )
             if emb:
+                print(f"✨ Direct multimodal embedding generated successfully ({len(emb)} dim)", flush=True)
                 return emb
-        except Exception as primary_err:
-            print(f"⚠️ Native multimodal embed error on '{embedding_model}': {primary_err}", flush=True)
+        except Exception as direct_err:
+            print(f"⚠️ Direct multimodal embed error on '{embedding_model}': {direct_err}", flush=True)
 
-        # 4. If SDK strips non-text parts or native call fails, use Gemini Flash Lite zero-shot visual tagging
+        # 4. If direct REST call fails, use Gemini Flash Lite zero-shot visual tagging + text embed fallback
         if image_bytes:
             visual_desc = await Services.describe_image_visually(image_bytes, mime_type)
             combined_query = f"{visual_desc} {text}".strip() if text else visual_desc
@@ -351,6 +367,20 @@ class Services():
 
         embedding_model = getattr(settings, "gemini_embedding_model", "gemini-embedding-2") or "gemini-embedding-2"
         dim = int(getattr(settings, "gemini_embedding_dimension", 768) or 768)
+
+        # Direct concurrent :embedContent calls for gemini-embedding-2
+        if "gemini-embedding-2" in embedding_model:
+            async def _single_embed(t: str):
+                return await call_vertex_embed_content(
+                    model=embedding_model,
+                    parts=[{"text": t}],
+                    output_dimensionality=dim,
+                )
+            results = await asyncio.gather(*[_single_embed(t) for t in texts], return_exceptions=True)
+            valid_results = [r for r in results if isinstance(r, list) and r]
+            if len(valid_results) == len(texts):
+                return valid_results
+            print(f"⚠️ Batch direct embed had partial failures ({len(valid_results)}/{len(texts)}), falling back to SDK", flush=True)
 
         def _embed_batch(model_name: str):
             response = _get_embedding_client().models.embed_content(
@@ -377,6 +407,7 @@ class Services():
         except Exception as e:
             print(f"generate_batch_embeddings error: {e}", flush=True)
             return []
+
 
     @staticmethod
     async def vectiriseproductblob(products_or_blobs: list):
