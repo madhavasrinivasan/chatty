@@ -16,7 +16,7 @@ from app.core.config.db import initialize_light_rag
 from typing import List
 import json
 from app.core.config.config import settings
-from app.core.config.gemini_client import get_genai_client
+from app.core.config.gemini_client import get_genai_client, get_genai_embedding_client
 from app.core.schema.applicationerror import ApplicationError
 from app.core.models.dbontrollers.admindbcontroller import AdminDbContoller
 from app.core.schema.schema import StoreDNA
@@ -24,6 +24,10 @@ from app.core.schema.schema import StoreDNA
 
 def _get_client() -> genai.Client:
     return get_genai_client()
+
+
+def _get_embedding_client() -> genai.Client:
+    return get_genai_embedding_client()
 
 
 class Services():
@@ -80,7 +84,7 @@ class Services():
         texts = [node.page_content for node in nodes]
         embeddings = []
         for text_batch in batch(texts, batch_size):
-            response = _get_client().models.embed_content(
+            response = _get_embedding_client().models.embed_content(
                 model="gemini-embedding-001",
                 contents=text_batch,
                 config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT", output_dimensionality=768)
@@ -174,7 +178,7 @@ class Services():
         dim = int(getattr(settings, "gemini_embedding_dimension", 768) or 768)
 
         def _embed(model_name: str):
-            response = _get_client().models.embed_content(
+            response = _get_embedding_client().models.embed_content(
                 model=model_name,
                 contents=[text],
                 config=types.EmbedContentConfig(
@@ -307,7 +311,7 @@ class Services():
 
         # 3. Try native multimodal embedding with gemini-embedding-2
         def _embed_multimodal(model_name: str):
-            response = _get_client().models.embed_content(
+            response = _get_embedding_client().models.embed_content(
                 model=model_name,
                 contents=contents,
                 config=types.EmbedContentConfig(
@@ -349,7 +353,7 @@ class Services():
         dim = int(getattr(settings, "gemini_embedding_dimension", 768) or 768)
 
         def _embed_batch(model_name: str):
-            response = _get_client().models.embed_content(
+            response = _get_embedding_client().models.embed_content(
                 model=model_name,
                 contents=texts,
                 config=types.EmbedContentConfig(

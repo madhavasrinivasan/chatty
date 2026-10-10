@@ -81,6 +81,34 @@ def get_genai_client() -> genai.Client:
     return _client
 
 
+_embedding_client: genai.Client | None = None
+
+
+def get_genai_embedding_client() -> genai.Client:
+    """
+    Dedicated client for embedding models.
+    Embedding models on Vertex AI require specific regional endpoints (e.g. us-central1)
+    and do not exist in the 'global' location.
+    """
+    global _embedding_client
+    if _embedding_client is None:
+        configure_gemini_env()
+        http_options = _build_http_options()
+        if settings.gemini_use_vertexai:
+            loc = getattr(settings, "gemini_embedding_location", "us-central1") or "us-central1"
+            if settings.gemini_location and settings.gemini_location != "global":
+                loc = settings.gemini_location
+            _embedding_client = genai.Client(
+                vertexai=True,
+                project=settings.gemini_project,
+                location=loc,
+                http_options=http_options,
+            )
+        else:
+            _embedding_client = get_genai_client()
+    return _embedding_client
+
+
 def generate_content_text(
     model: str,
     contents: Any,
