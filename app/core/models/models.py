@@ -350,6 +350,12 @@ class ecom_store(Model):
     total_input_tokens = fields.BigIntField(default=0)
     total_output_tokens = fields.BigIntField(default=0)
     total_cost_usd = fields.FloatField(default=0.0)
+    # Prompt-cache + multi-intent analytics.
+    total_cached_input_tokens = fields.BigIntField(default=0)
+    total_multi_intent_turns = fields.BigIntField(default=0)
+    total_product_searches = fields.BigIntField(default=0)
+    total_knowledge_searches = fields.BigIntField(default=0)
+    total_escalations = fields.BigIntField(default=0)
     # Comez / multi-platform storefront context
     storefront_url = fields.CharField(max_length=512, null=True)  # e.g. https://mystore.com — used for /api/cart/add
     custom_domain = fields.BooleanField(default=False)  # x-custom-domain header
@@ -432,6 +438,10 @@ class ChatSession(Model):
     input_tokens_total = fields.BigIntField(default=0)
     output_tokens_total = fields.BigIntField(default=0)
     estimated_cost_usd_total = fields.FloatField(default=0.0)
+    cached_input_tokens_total = fields.BigIntField(default=0)
+    multi_intent_turns = fields.IntField(default=0)
+    product_searches_total = fields.IntField(default=0)
+    knowledge_searches_total = fields.IntField(default=0)
     status = fields.CharField(max_length=20, default="active")
     needs_human = fields.BooleanField(default=False)
     prefetched_order_history = fields.TextField(null=True)

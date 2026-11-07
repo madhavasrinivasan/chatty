@@ -899,10 +899,17 @@ class AdminDbContoller:
                 "total_input_tokens": 0,
                 "total_output_tokens": 0,
                 "total_tokens": 0,
+                "total_cached_input_tokens": 0,
+                "cache_savings_usd": 0.0,
+                "cache_savings_inr": 0.0,
                 "total_cost_usd": 0.0,
                 "total_cost_inr": 0.0,
                 "usd_to_inr_rate": USD_TO_INR,
                 "active_sessions_today": 0,
+                "multi_intent_turns": 0,
+                "product_searches": 0,
+                "knowledge_searches": 0,
+                "escalations": 0,
             }
 
         store_id = store.id
@@ -939,8 +946,19 @@ class AdminDbContoller:
 
         tin = int(getattr(store, "total_input_tokens", 0) or 0)
         tout = int(getattr(store, "total_output_tokens", 0) or 0)
+        tcached = int(getattr(store, "total_cached_input_tokens", 0) or 0)
         tcost_usd = float(getattr(store, "total_cost_usd", 0.0) or 0.0)
         tcost_inr = usd_to_inr(tcost_usd)
+
+        from app.core.services.token_tracker import GEMINI_PRICING, CACHED_INPUT_PRICE_FACTOR
+
+        pricing = GEMINI_PRICING.get("gemini-2.5-flash") or {"input": 0.30}
+        savings_usd = round(
+            (tcached / 1_000_000)
+            * float(pricing.get("input", 0.30))
+            * (1.0 - CACHED_INPUT_PRICE_FACTOR),
+            8,
+        )
 
         return {
             "store_id": store_id,
@@ -952,8 +970,15 @@ class AdminDbContoller:
             "total_input_tokens": tin,
             "total_output_tokens": tout,
             "total_tokens": tin + tout,
+            "total_cached_input_tokens": tcached,
+            "cache_savings_usd": savings_usd,
+            "cache_savings_inr": usd_to_inr(savings_usd),
             "total_cost_usd": round(tcost_usd, 8),
             "total_cost_inr": tcost_inr,
             "usd_to_inr_rate": USD_TO_INR,
             "active_sessions_today": active_sessions_today,
+            "multi_intent_turns": int(getattr(store, "total_multi_intent_turns", 0) or 0),
+            "product_searches": int(getattr(store, "total_product_searches", 0) or 0),
+            "knowledge_searches": int(getattr(store, "total_knowledge_searches", 0) or 0),
+            "escalations": int(getattr(store, "total_escalations", 0) or 0),
         }

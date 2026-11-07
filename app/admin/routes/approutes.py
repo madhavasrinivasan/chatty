@@ -73,6 +73,21 @@ def _message_text_for_llm(m: ChatMessage) -> str:
     return (m.content or "").strip()
 
 
+def _chat_history_entry(m: ChatMessage) -> dict:
+    """Preserve structured product cards alongside the assistant's text so
+    follow-ups ("add the second one") can resolve exact product ids."""
+    entry: dict = {
+        "role": m.role,
+        "content": _message_text_for_llm(m),
+    }
+    payload = getattr(m, "payload", None)
+    if isinstance(payload, dict):
+        products = payload.get("products")
+        if isinstance(products, list) and products:
+            entry["products"] = products
+    return entry
+
+
 def _final_response_to_dict(final_response) -> dict:
     if final_response is None:
         return {}
@@ -493,7 +508,7 @@ async def process_orchestrate_chatbot(
     # Load last N messages from DB for LLM context (chronological order).
     recent_msgs = await ChatMessage.filter(session_id=session_uuid).order_by("-created_at").limit(CHAT_HISTORY_MAX)
     recent_msgs_list = list(recent_msgs)[::-1]
-    chat_history = [{"role": m.role, "content": _message_text_for_llm(m)} for m in recent_msgs_list]
+    chat_history = [_chat_history_entry(m) for m in recent_msgs_list]
 
     store = None
     chatbot_id = user.get("chatbot_id")
@@ -509,25 +524,34 @@ async def process_orchestrate_chatbot(
     previous_session_history = getattr(session, "prefetched_previous_session_history", None) if session else None
     order_history = getattr(session, "prefetched_order_history", None) if session else None
 
-    # Fallback to fetching dynamically if not cached/prefetched in the session
+    # Fallback to fetching dynamically if not cached/prefetched in the session.
+    # Facts work for anonymous shoppers too (session id is the fallback memory key).
+    need_update = False
+    if store and not user_facts:
+        try:
+            user_facts = await get_user_facts_for_context(
+                customer_email, store.id, session_id=resolved_session_id
+            )
+            need_update = True
+        except Exception as e:
+            print(f"User facts lookup skipped: {e}", flush=True)
+
+    # Order history + previous sessions require a real customer identity.
     if customer_email and store:
         tasks = []
-        need_update = False
-        
-        if not user_facts:
-            tasks.append(get_user_facts_for_context(customer_email, store.id))
-            need_update = True
-        else:
-            async def _dummy_facts(): return user_facts
-            tasks.append(_dummy_facts())
-            
         if not previous_session_history:
-            tasks.append(get_previous_session_summary_for_context(customer_email, store.id, exclude_session_id=resolved_session_id))
+            tasks.append(
+                get_previous_session_summary_for_context(
+                    customer_email,
+                    store.id,
+                    exclude_session_id=resolved_session_id,
+                )
+            )
             need_update = True
         else:
             async def _dummy_prev(): return previous_session_history
             tasks.append(_dummy_prev())
-            
+
         if not order_history:
             tasks.append(
                 get_order_history_for_context(
@@ -541,22 +565,19 @@ async def process_orchestrate_chatbot(
         else:
             async def _dummy_orders(): return order_history
             tasks.append(_dummy_orders())
-            
-        fetched_user_facts, fetched_prev_sess, fetched_orders = await asyncio.gather(*tasks)
-        
-        if not user_facts:
-            user_facts = fetched_user_facts
+
+        fetched_prev_sess, fetched_orders = await asyncio.gather(*tasks)
         if not previous_session_history:
             previous_session_history = fetched_prev_sess
         if not order_history:
             order_history = fetched_orders
-            
-        if need_update and session:
-            await ChatSession.filter(id=session_uuid).update(
-                prefetched_user_facts=user_facts,
-                prefetched_previous_session_history=previous_session_history,
-                prefetched_order_history=order_history
-            )
+
+    if need_update and session:
+        await ChatSession.filter(id=session_uuid).update(
+            prefetched_user_facts=user_facts,
+            prefetched_previous_session_history=previous_session_history,
+            prefetched_order_history=order_history
+        )
     
     _t_context = _time.perf_counter()
     print(f"⏱️ [TIMING] Context loading (chat history + store + user facts + orders): {_t_context - _t_session:.2f}s")
@@ -635,6 +656,22 @@ async def process_orchestrate_chatbot(
     except Exception:
         # Never fail the chat request due to persistence errors.
         pass
+
+    try:
+        from app.core.services.frustration import maybe_escalate_to_human
+
+        ticket_id = await maybe_escalate_to_human(
+            message=body.message,
+            session_id=resolved_session_id,
+            store=store,
+            customer_email=customer_email or None,
+            chat_history=chat_history,
+        )
+        if ticket_id and isinstance(api_resp.data, dict):
+            api_resp.data["escalation_ticket_id"] = ticket_id
+            api_resp.data["needs_human"] = True
+    except Exception as esc_err:
+        print(f"Escalation check skipped: {esc_err}", flush=True)
 
     return api_resp
 

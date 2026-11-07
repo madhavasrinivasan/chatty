@@ -77,6 +77,12 @@ class JevRouteResult:
     probabilities: dict[str, float] = field(default_factory=dict)
     is_product_ask: float | None = None
     enough_info: float | None = None
+    # Multi-label intent matrix: every intent is an independent decision, so a
+    # single compound question can require products AND knowledge AND order status.
+    needs_products: bool = False
+    needs_knowledge: bool = False
+    needs_order_status: bool = False
+    is_return_request: bool = False
     sort: str = "none"
     search_scope: str = "products"
     wants_discounts: bool = False
@@ -372,18 +378,32 @@ async def classify_intent_jev(
                                 ),
                             },
                         ),
-                        "is_product_ask": Noul(
+                        "needs_products": Noul(
                             instructions=(
-                                "Is the latest user message about shopping for / browsing / "
-                                "comparing products or finding cheapest/expensive items "
-                                "(not hello, not order tracking, not store policy/FAQ)?"
+                                "Is the user browsing, shopping, comparing, or asking about "
+                                "products, prices, sizes, variants, colors, or catalog items? "
+                                "This is independent of every other intent — a compound "
+                                "question can need products AND policies at the same time."
                             ),
                         ),
-                        "is_knowledge_ask": Noul(
+                        "needs_knowledge": Noul(
                             instructions=(
-                                "Is the latest user asking about store policies, shipping info, "
-                                "return/refund policy text, FAQs, about-us, or other non-product "
-                                "store knowledge pages (not tracking a specific order)?"
+                                "Is the user asking about store policies, shipping/delivery "
+                                "times, returns/refunds, FAQs, store info, or other non-product "
+                                "knowledge pages? Independent of product intent — a compound "
+                                "question can need both."
+                            ),
+                        ),
+                        "needs_order_status": Noul(
+                            instructions=(
+                                "Is the user checking the status or tracking of a specific past "
+                                "purchase/order (usually mentions an order number or 'my order')?"
+                            ),
+                        ),
+                        "is_return_request": Noul(
+                            instructions=(
+                                "Does the customer explicitly want to initiate an exchange, "
+                                "return, or refund of a purchase they already made?"
                             ),
                         ),
                         "enough_info": Noul(
@@ -487,8 +507,10 @@ async def classify_intent_jev(
     confidence = float(route_ans.confidence or 0.0)
     probs = dict(route_ans.probabilities or {})
 
-    is_product = float(result.nouls["is_product_ask"].noul)
-    is_knowledge = float(result.nouls["is_knowledge_ask"].noul)
+    is_product = float(result.nouls["needs_products"].noul)
+    is_knowledge = float(result.nouls["needs_knowledge"].noul)
+    needs_order_status = float(result.nouls["needs_order_status"].noul) >= 0.55
+    is_return_request = float(result.nouls["is_return_request"].noul) >= 0.55
     enough = float(result.nouls["enough_info"].noul)
     needs_exp_ans = result.nouls["needs_expander"]
     needs_exp_p = float(needs_exp_ans.noul)
@@ -518,6 +540,23 @@ async def classify_intent_jev(
             confidence = max(confidence, 0.9)
     elif scope == "knowledge":
         # Don't keep knowledge scope unless the ask is actually about policies/FAQ
+        scope = "products"
+
+    # --- Independent multi-label intents -------------------------------------
+    # A compound question ("show swaddles under $30 AND what is your return
+    # policy?") must set both flags so retrieval can run in parallel.
+    order_num_hint = extract_order_number(message)
+    needs_knowledge = bool(knowledge_hint or is_knowledge >= 0.55 or is_return_request)
+    needs_products = bool(
+        is_product >= 0.55
+        or bool(sort_hint)
+        or (route in ("HYBRID_SEARCH", "CATALOG_AGENT") and not needs_knowledge)
+    )
+    if order_num_hint and not needs_knowledge and is_product < 0.55 and not sort_hint:
+        needs_order_status = True
+    # Primary payload follows the product ask when both are requested; the
+    # orchestrator builds a separate knowledge payload for the second branch.
+    if needs_products and needs_knowledge:
         scope = "products"
 
     reason = "ok"
@@ -567,11 +606,12 @@ async def classify_intent_jev(
         else:
             needs_expander = True  # product browse / vibe / CATALOG
 
-    order_num = extract_order_number(message) if route == "ORDER_SUPPORT" else None
+    order_num = order_num_hint if (route == "ORDER_SUPPORT" or needs_order_status) else None
     search_payload = None
     follow_up = None
     if route in ("HYBRID_SEARCH", "CATALOG_AGENT"):
-        search_payload = build_search_payload_from_jev(message, sort, scope)
+        payload_scope = "products" if needs_products else scope
+        search_payload = build_search_payload_from_jev(message, sort, payload_scope)
     if route == "FOLLOW_UP_QUESTION":
         follow_up = (
             "Happy to help — what are you looking for "
@@ -581,6 +621,8 @@ async def classify_intent_jev(
     print(
         f"[JEV] route={route} conf={confidence:.2f} "
         f"product={is_product:.2f} knowledge={is_knowledge:.2f} enough={enough:.2f} "
+        f"intents(products={needs_products} knowledge={needs_knowledge} "
+        f"order={needs_order_status} return={is_return_request}) "
         f"sort={sort} scope={scope} needs_expander={needs_expander} "
         f"(noul={needs_exp_p:.2f} conf={needs_exp_conf:.2f}) "
         f"discounts={wants_disc} ({ms:.0f}ms) reason={reason}",
@@ -593,6 +635,10 @@ async def classify_intent_jev(
         probabilities=probs,
         is_product_ask=is_product,
         enough_info=enough,
+        needs_products=needs_products,
+        needs_knowledge=needs_knowledge,
+        needs_order_status=needs_order_status,
+        is_return_request=is_return_request,
         sort=sort,
         search_scope=scope,
         wants_discounts=wants_disc,
@@ -615,6 +661,12 @@ def jev_result_to_route_dict(jev: JevRouteResult) -> dict[str, Any]:
         "extracted_order_number": jev.extracted_order_number,
         "wants_discounts": jev.wants_discounts,
         "search_payload": jev.search_payload,
+        "intents": {
+            "needs_products": jev.needs_products,
+            "needs_knowledge": jev.needs_knowledge,
+            "needs_order_status": jev.needs_order_status,
+            "is_return_request": jev.is_return_request,
+        },
         "_usage": {
             "jev_router": {
                 "input_tokens": 0,

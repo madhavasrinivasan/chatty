@@ -7,7 +7,10 @@ from typing import Any
 import httpx
 
 from app.core.config.config import settings
-from app.core.config.gemini_client import generate_content_text, get_genai_client
+from app.core.config.gemini_client import (
+    generate_content_with_usage,
+    get_genai_client,
+)
 from app.core.schema.schema import (
     FinalFrontendResponse,
     FrontendAction,
@@ -286,12 +289,70 @@ def _format_active_chat_for_synthesizer(active_chat_history: list[dict[str, Any]
                     t = p.get("title") or "Item"
                     pid = p.get("product_id") or p.get("id") or ""
                     vid = p.get("variant_id") or ""
-                    items.append(f"#{idx+1}: '{t}' (id: {pid}, variant: {vid})")
+                    price = p.get("price")
+                    price_txt = f", price: {price}" if price not in (None, "") else ""
+                    items.append(
+                        f"#{idx+1}: [ID: {pid}] '{t}' (variant: {vid}{price_txt})"
+                    )
             if items:
                 prod_snippet = f"\n  [Attached products shown in this turn: {', '.join(items)}]"
         if content or prod_snippet:
             lines.append(f"{role}: {content}{prod_snippet}")
     return "\n".join(lines) if lines else ""
+
+
+def _format_previous_recommendations(
+    active_chat_history: list[dict[str, Any]] | None,
+) -> str:
+    """Stable, numbered list of products the assistant already showed.
+
+    Follow-ups like "add the second one" or "does that blue one shrink?" must map
+    back to the exact product id from an earlier turn.
+    """
+    if not active_chat_history:
+        return ""
+    last_products: list[Any] | None = None
+    for msg in reversed(active_chat_history):
+        if not isinstance(msg, dict):
+            continue
+        if (msg.get("role") or "").lower() != "assistant":
+            continue
+        prods = msg.get("products")
+        if isinstance(prods, list) and prods:
+            last_products = prods
+            break
+    if not last_products:
+        return ""
+    lines = []
+    for idx, p in enumerate(last_products[:8], start=1):
+        if not isinstance(p, dict):
+            continue
+        pid = p.get("product_id") or p.get("id") or ""
+        title = p.get("title") or "Item"
+        price = p.get("price")
+        price_txt = f" (${price})" if price not in (None, "") else ""
+        lines.append(f"{idx}. [ID: {pid}] {title}{price_txt}")
+    if not lines:
+        return ""
+    return "PREVIOUS ASSISTANT RECOMMENDATIONS:\n" + "\n".join(lines)
+
+
+def _format_knowledge_context(
+    knowledge_results: list[dict[str, Any]] | None,
+) -> str:
+    """Format store policies/FAQs/pages retrieved in parallel with products."""
+    if not knowledge_results:
+        return ""
+    parts: list[str] = []
+    for row in knowledge_results[:6]:
+        if not isinstance(row, dict):
+            continue
+        title = (row.get("title") or "").strip()
+        content = (row.get("content") or "").strip()
+        if not title and not content:
+            continue
+        parts.append(f"## {title}\n{content[:900]}")
+    return "\n\n".join(parts)
 
 
 async def _resolve_frontend_action(
@@ -392,6 +453,7 @@ async def generate_final_response(
     previous_session_history: str = "",
     active_chat_history: list[dict[str, Any]] | None = None,
     cart_items: list[dict[str, Any]] | None = None,
+    knowledge_results: list[dict[str, Any]] | None = None,
     thinking_budget: int | None = None,
     system_prompt_override: str | None = None,
 ) -> tuple[FinalFrontendResponse, dict[str, dict[str, int]]]:
@@ -432,28 +494,48 @@ async def generate_final_response(
             separators=(",", ":"),
             default=str,
         )
-    memory_block = ""
-    if (user_facts or "").strip() or (order_history or "").strip() or (previous_session_history or "").strip():
-        memory_block = (
-            "USER FACTS: " + (user_facts or "").strip() + "\n"
-            "PAST ORDERS: " + (order_history or "").strip() + "\n"
-            "PAST CHATS: " + (previous_session_history or "").strip() + "\n\n"
-        )
-    active_block = _format_active_chat_for_synthesizer(active_chat_history)
-    if active_block:
-        memory_block += "ACTIVE SESSION (last 10 messages):\n" + active_block + "\n\n"
-    
+    # --- Dynamic suffix blocks (change every turn) ---------------------------
+    dynamic_parts: list[str] = []
+    if (user_facts or "").strip():
+        dynamic_parts.append("USER FACTS:\n" + (user_facts or "").strip())
+    if (order_history or "").strip():
+        dynamic_parts.append("PAST ORDERS:\n" + (order_history or "").strip())
+    if (previous_session_history or "").strip():
+        dynamic_parts.append("PAST CHATS:\n" + (previous_session_history or "").strip())
     if cart_items:
         try:
-            cart_str = json.dumps([{"title": i.get("title"), "quantity": i.get("quantity"), "price": i.get("price")} for i in cart_items], separators=(",", ":"))
-            memory_block += f"USER'S CURRENT CART (They have these items in their cart right now):\n{cart_str}\n\n"
+            cart_str = json.dumps(
+                [
+                    {
+                        "title": i.get("title"),
+                        "quantity": i.get("quantity"),
+                        "price": i.get("price"),
+                    }
+                    for i in cart_items
+                ],
+                separators=(",", ":"),
+            )
+            dynamic_parts.append(
+                "USER'S CURRENT CART (They have these items in their cart right now):\n"
+                + cart_str
+            )
         except Exception:
             pass
+    dynamic_memory = "\n\n".join(dynamic_parts)
+
+    # --- Conversation turns (cached incrementally) ---------------------------
+    active_block = _format_active_chat_for_synthesizer(active_chat_history)
+    recs_block = _format_previous_recommendations(active_chat_history)
+
+    # --- Static/semi-static store knowledge (policies, FAQ, pages) -----------
+    knowledge_block = _format_knowledge_context(knowledge_results)
 
     instruction = (
         "You are a confident, high-performing sales associate for this store. Use the full context "
         "(active session, past chats, facts, orders, and current cart) to sell like a knowledgeable human rep who is trusted with real store data.\n\n"
         "TONE & BEHAVIOR RULES (follow all):\n"
+        "0. ANSWER ALL QUESTIONS FIRST: If the shopper asked multiple questions (e.g. sizing/care/fabric AND shipping/returns/pricing), you MUST explicitly answer each question before pitching recommendations. "
+        "Never drop a policy or factual question to focus solely on selling. If store knowledge/policies are provided, answer from them directly and cite the relevant detail.\n"
         "1. BE ASSUMPTIVE, NOT PERMISSION-SEEKING. Recommend directly and drive toward the sale. "
         "Say 'Here's the X in your size — I can add it to your cart or you can tap Add to Cart below.'\n"
         "2. ALWAYS CITE EXACT NUMBERS. State exact price with currency and, when a product has a discount, the exact percentage or amount AND the exact code "
@@ -483,49 +565,82 @@ async def generate_final_response(
     )
     if system_prompt_override and system_prompt_override.strip():
         instruction += f"MERCHANT STORE CUSTOM RULES & INSTRUCTIONS (strictly respect and adhere to these guidelines):\n{system_prompt_override.strip()}\n\n"
-    prompt = f"""{instruction}{memory_block}Current user question: "{user_query}".
 
-Search results from our catalog (use these to answer and to pick products):
-{context}
+    # Stable prefix: persona/rules → merchant rules → store knowledge → output
+    # contract. Keeping this block byte-identical across turns maximizes Gemini
+    # prompt-cache hits (cached input tokens are ~75% cheaper).
+    knowledge_section = ""
+    if knowledge_block:
+        knowledge_section = (
+            "\n[GENERAL STORE KNOWLEDGE & POLICIES]\n"
+            + knowledge_block
+            + "\n"
+        )
 
+    output_contract = """
+[OUTPUT CONTRACT]
 Output a JSON object with this exact shape. Use empty lists [] when not relevant.
-- general_answer: Markdown answer written as an assumptive sales rep. Recommend directly, cite exact prices/discount %/codes, and end with a specific next action or question. If adding an item to cart or applying a discount, confirm it here.
+- general_answer: Markdown answer written as an assumptive sales rep. Answer every question the shopper asked, then recommend directly, cite exact prices/discount %/codes, and end with a specific next action or question. If adding an item to cart or applying a discount, confirm it here.
 - urls: Policy/sizing/collection page links ONLY. Never product image URLs. Empty [] if none.
-- selected_products: REQUIRED whenever you recommend catalog products. List of {{ "product_id": "<exact id from results above>", "requested_options": [] or e.g. ["Black","XL"] }}. Max 5. Empty [] ONLY if the answer is not about specific products.
+- selected_products: REQUIRED whenever you recommend catalog products. List of { "product_id": "<exact id from results above>", "requested_options": [] or e.g. ["Black","XL"] }. Max 5. Empty [] ONLY if the answer is not about specific products.
 - suggested_actions: 2-3 short follow-up questions or actionable chips for the UI (e.g. "Add <Product Name> to cart", "Apply code <CODE>", "Show size guide").
 - action: Optional client action. Fill when shopper wants to add an item to their cart or apply a discount coupon. Otherwise null.
-  {{
+  {
     "type": "AUTO_ADD_TO_CART" | "APPLY_DISCOUNT" | "ADD_AND_APPLY_DISCOUNT" | null,
     "product_index": 1-based index (e.g. 1 or 2) or null,
     "product_id": string or null,
     "requested_options": ["Blue", "M"] or [],
     "quantity": 1,
     "discount_code": "<CODE>" or null
-  }}
+  }
 
-Output ONLY valid JSON, no markdown code block."""
+Output ONLY valid JSON, no markdown code block.
+"""
+
+    prompt = f"""{instruction}{knowledge_section}{output_contract}
+
+[CONVERSATION TURNS]
+{active_block or "(none)"}
+
+[DYNAMIC CONTEXT — CUSTOMER MEMORY, ORDERS & CART]
+{dynamic_memory or "(none)"}
+
+[DYNAMIC CONTEXT — PREVIOUS ASSISTANT RECOMMENDATIONS]
+{recs_block or "(none)"}
+
+[DYNAMIC CONTEXT — CURRENT CATALOG RESULTS]
+{context or "(none)"}
+
+[CURRENT USER QUESTION]
+{user_query}"""
 
     input_tokens = estimate_tokens(prompt)
     llm_output: LLMSynthesisOutput
     output_tokens = 0
+    cached_input_tokens = 0
+    # A higher cap prevents the JSON schema from squeezing multi-question answers
+    # into a truncated reply. Thinking tokens count toward the cap only when
+    # thinking is enabled.
+    max_output = int(getattr(settings, "gemini_synthesis_max_output_tokens", 2000) or 2000)
     try:
-        raw = await asyncio.to_thread(
-            generate_content_text,
+        raw, real_usage = await asyncio.to_thread(
+            generate_content_with_usage,
             MODEL,
             prompt,
             {
                 "response_mime_type": "application/json",
                 "response_json_schema": LLMSynthesisOutput.model_json_schema(),
-                # With thinking OFF (budget 0) a max_output_tokens cap is safe and
-                # shortens generation time.  If thinking is enabled (-1 or N) remove
-                # this cap because thinking tokens count toward the limit.
                 **({
-                    "max_output_tokens": 800,
+                    "max_output_tokens": max_output,
                 } if budget == 0 else {}),
                 "thinking_config": {"thinking_budget": budget},
             },
         )
-        output_tokens = estimate_tokens(raw or "")
+        real_prompt = int(real_usage.get("prompt_token_count") or 0)
+        if real_prompt:
+            input_tokens = real_prompt
+        output_tokens = int(real_usage.get("candidates_token_count") or 0) or estimate_tokens(raw or "")
+        cached_input_tokens = int(real_usage.get("cached_content_token_count") or 0)
         data = json.loads(raw)
         llm_output = LLMSynthesisOutput(
             general_answer=data.get("general_answer", ""),
@@ -563,6 +678,7 @@ Output ONLY valid JSON, no markdown code block."""
         "final_response": {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "cached_input_tokens": cached_input_tokens,
         }
     }
 

@@ -234,6 +234,59 @@ async def call_vertex_embed_content(
 
 
 
+def _usage_from_response(response: Any) -> dict[str, int]:
+    """Extract real token counts (including Gemini prompt-cache hits) from a response."""
+    meta = getattr(response, "usage_metadata", None)
+    if meta is None:
+        return {
+            "prompt_token_count": 0,
+            "candidates_token_count": 0,
+            "cached_content_token_count": 0,
+            "total_token_count": 0,
+        }
+
+    def _int(name: str) -> int:
+        try:
+            return int(getattr(meta, name, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "prompt_token_count": _int("prompt_token_count"),
+        "candidates_token_count": _int("candidates_token_count"),
+        "cached_content_token_count": _int("cached_content_token_count"),
+        "total_token_count": _int("total_token_count"),
+    }
+
+
+def generate_content_with_usage(
+    model: str,
+    contents: Any,
+    config: dict | None = None,
+    *,
+    empty_retries: int = 1,
+) -> tuple[str, dict[str, int]]:
+    """
+    Like generate_content_text, but also returns real Gemini usage metadata so
+    callers can persist prompt-cache hits (`cached_content_token_count`) and
+    exact token counts instead of tiktoken estimates.
+    """
+    client = get_genai_client()
+    text = ""
+    usage: dict[str, int] = {}
+    for _ in range(max(1, empty_retries + 1)):
+        response = client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=config or {},
+        )
+        usage = _usage_from_response(response)
+        text = (getattr(response, "text", None) or "").strip()
+        if text:
+            return text, usage
+    return text, usage
+
+
 def generate_content_text(
     model: str,
     contents: Any,
@@ -250,15 +303,10 @@ def generate_content_text(
     was silently degrading the router to its fallback payload. Returns "" if every
     attempt is empty; hard exceptions propagate to the caller's own fallback.
     """
-    client = get_genai_client()
-    text = ""
-    for _ in range(max(1, empty_retries + 1)):
-        response = client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=config or {},
-        )
-        text = (getattr(response, "text", None) or "").strip()
-        if text:
-            return text
+    text, _ = generate_content_with_usage(
+        model,
+        contents,
+        config,
+        empty_retries=empty_retries,
+    )
     return text

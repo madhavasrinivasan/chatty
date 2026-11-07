@@ -76,17 +76,27 @@ async def extract_facts_from_transcript(chat_history: list[dict[str, Any]]) -> l
         return []
 
 
-async def get_user_facts_for_context(user_email: str, store_id: int) -> str:
-    """Compile permanent facts for this user/store into a single string for prompts."""
-    if not (user_email or "").strip():
+async def get_user_facts_for_context(
+    user_email: str,
+    store_id: int,
+    session_id: str | None = None,
+) -> str:
+    """Compile permanent facts for this user/store into a single string for prompts.
+
+    Anonymous shoppers fall back to the session id as the memory key, so visitors
+    who have not logged in still retain preferences (baby age, sizes, fabric) for
+    the whole visit.
+    """
+    memory_key = (user_email or "").strip() or (session_id or "").strip()
+    if not memory_key:
         return ""
     try:
         rows = await UserMemorySummary.filter(
-            user_email=user_email.strip(),
+            user_email=memory_key,
             store_id=store_id,
         ).order_by("-created_at").limit(50)
         facts = [r.fact for r in rows if (r.fact or "").strip()]
-        return " ".join(facts) if facts else ""
+        return "\n".join(f"- {f.strip()}" for f in facts) if facts else ""
     except Exception as e:
         print(f"get_user_facts_for_context error: {e}")
         return ""
@@ -194,23 +204,25 @@ async def process_and_save_session(payload: SyncSessionRequest) -> None:
         session_id=payload.session_id,
     )
 
-    # 2. If user_email and store_id provided and enough messages, summarize once and save as a whole (replace previous facts)
+    # 2. Summarize once and save as a whole when we have a memory key (email or
+    # anonymous session id) and enough messages.
+    memory_key = (payload.user_email or "").strip() or (payload.session_id or "").strip()
     if (
-        payload.user_email
+        memory_key
         and payload.store_id is not None
         and len(payload.chat_history) > 6
     ):
         facts = await extract_facts_from_transcript(payload.chat_history)
-        # Replace all existing facts for this user+store with this consolidated set (one summarized whole per sync)
+        # Replace all existing facts for this memory key+store with this consolidated set
         await UserMemorySummary.filter(
-            user_email=payload.user_email,
+            user_email=memory_key,
             store_id=payload.store_id,
         ).delete()
         for fact in facts:
             if not fact:
                 continue
             await UserMemorySummary.create(
-                user_email=payload.user_email,
+                user_email=memory_key,
                 store_id=payload.store_id,
                 fact=fact,
             )

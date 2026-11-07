@@ -1174,18 +1174,70 @@ class  AppController:
         ):
             try:
                 _t_db_start = _time.perf_counter()
+                intents = result.get("intents") or {}
+                wants_knowledge = bool(intents.get("needs_knowledge")) and not user_has_image
+                knowledge_rows: list[dict] = []
+                knowledge_payload = result.get("knowledge_search_payload")
+
                 if result.get("search_results") is not None:
                     rows = result.get("search_results") or []
+                    knowledge_rows = result.get("knowledge_results") or []
+                    if wants_knowledge and knowledge_payload and not knowledge_rows:
+                        try:
+                            knowledge_rows = await execute_search(
+                                store_id=store_id, payload=knowledge_payload
+                            )
+                        except Exception as k_err:
+                            print(f"[MULTI] knowledge search failed: {k_err}", flush=True)
                     print(
                         f"  ⏱️ [CTRL] Using existing search_results: {_time.perf_counter() - _t_db_start:.2f}s  |  "
-                        f"{len(rows)} rows  |  trace={result.get('tool_trace')}"
+                        f"{len(rows)} rows  |  {len(knowledge_rows)} knowledge rows  |  trace={result.get('tool_trace')}"
                     )
                 elif result.get("search_payload"):
-                    rows = await execute_search(store_id=store_id, payload=result["search_payload"])
-                    _t_db_end = _time.perf_counter()
-                    print(f"  ⏱️ [CTRL] DB Search (execute_search): {_t_db_end - _t_db_start:.2f}s  |  {len(rows)} rows")
+                    if wants_knowledge and knowledge_payload:
+                        # Multi-intent: fetch products and policies concurrently.
+                        _fetch = await asyncio.gather(
+                            execute_search(store_id=store_id, payload=result["search_payload"]),
+                            execute_search(store_id=store_id, payload=knowledge_payload),
+                            return_exceptions=True,
+                        )
+                        prod_res, know_res = _fetch
+                        if isinstance(prod_res, Exception):
+                            print(f"[MULTI] product search failed: {prod_res}", flush=True)
+                            rows = []
+                        else:
+                            rows = prod_res or []
+                        if isinstance(know_res, Exception):
+                            print(f"[MULTI] knowledge search failed: {know_res}", flush=True)
+                            knowledge_rows = []
+                        else:
+                            knowledge_rows = know_res or []
+                        _t_db_end = _time.perf_counter()
+                        print(
+                            f"  ⏱️ [CTRL] Parallel DB Search (products+knowledge): "
+                            f"{_t_db_end - _t_db_start:.2f}s  |  {len(rows)} products  |  "
+                            f"{len(knowledge_rows)} knowledge rows"
+                        )
+                    else:
+                        rows = await execute_search(store_id=store_id, payload=result["search_payload"])
+                        _t_db_end = _time.perf_counter()
+                        print(f"  ⏱️ [CTRL] DB Search (execute_search): {_t_db_end - _t_db_start:.2f}s  |  {len(rows)} rows")
                 else:
                     rows = []
+
+                # Knowledge-only turns keep policy rows out of the product pipeline.
+                scope = str(
+                    (result.get("search_payload") or {}).get("search_scope") or ""
+                ).lower()
+                if scope in ("knowledge", "pages", "policy", "faq") and not intents.get(
+                    "needs_products"
+                ):
+                    if not knowledge_rows:
+                        knowledge_rows = rows
+                    rows = []
+
+                result["knowledge_results"] = knowledge_rows
+                result["search_results"] = rows
 
                 # Enrich hybrid search results with discount_info when discounts were requested.
                 discounts = result.get("discounts") or []
@@ -1275,6 +1327,7 @@ class  AppController:
                             previous_session_history=previous_session_history,
                             active_chat_history=chat_history,
                             cart_items=request.cart_items,
+                            knowledge_results=result.get("knowledge_results") or [],
                             thinking_budget=synth_budget,
                             system_prompt_override=system_prompt_override,
                         )
@@ -1373,10 +1426,31 @@ class  AppController:
                 result["search_results"] = []
 
         try:
+            intents = result.get("intents") or {}
+            route_name = str(result.get("route") or "")
+            scope = str(
+                (result.get("search_payload") or {}).get("search_scope") or ""
+            ).lower()
+            product_search = (
+                1
+                if route_name in ("HYBRID_SEARCH", "CATALOG_AGENT")
+                and (
+                    intents.get("needs_products")
+                    or scope in ("", "products", "all")
+                )
+                else 0
+            )
             await AppController._persist_orchestrator_token_usage(
                 store_id,
                 (request.session_id or "").strip() or None,
                 result.get("token_usage"),
+                analytics={
+                    "multi_intent": bool(result.get("multi_intent")),
+                    "product_searches": product_search,
+                    "knowledge_searches": 1
+                    if (result.get("knowledge_search_payload") or intents.get("needs_knowledge"))
+                    else 0,
+                },
             )
         except Exception as persist_err:
             print(f"Token usage persist skipped: {persist_err}", flush=True)
@@ -1678,17 +1752,24 @@ class  AppController:
         store_id: int | None,
         session_id: str | None,
         token_usage: dict | None,
+        analytics: dict | None = None,
     ) -> None:
-        if not token_usage or not token_usage.get("totals"):
-            return
-        totals = token_usage["totals"]
+        analytics = analytics or {}
+        multi_intent_inc = 1 if analytics.get("multi_intent") else 0
+        product_inc = int(analytics.get("product_searches", 0) or 0)
+        knowledge_inc = int(analytics.get("knowledge_searches", 0) or 0)
+        escalation_inc = int(analytics.get("escalations", 0) or 0)
+        totals = (token_usage or {}).get("totals") or {}
         try:
             tin = int(totals.get("input_tokens", 0))
             tout = int(totals.get("output_tokens", 0))
+            tcached = int(totals.get("cached_input_tokens", 0))
             cost = float(totals.get("total_cost_usd", 0.0))
         except (TypeError, ValueError):
             return
-        if tin == 0 and tout == 0:
+        if tin == 0 and tout == 0 and not (
+            multi_intent_inc or product_inc or knowledge_inc or escalation_inc
+        ):
             return
         if store_id:
             store = await ecom_store.filter(id=store_id).first()
@@ -1696,11 +1777,31 @@ class  AppController:
                 store.total_input_tokens = int(getattr(store, "total_input_tokens", 0) or 0) + tin
                 store.total_output_tokens = int(getattr(store, "total_output_tokens", 0) or 0) + tout
                 store.total_cost_usd = float(getattr(store, "total_cost_usd", 0.0) or 0.0) + cost
+                store.total_cached_input_tokens = (
+                    int(getattr(store, "total_cached_input_tokens", 0) or 0) + tcached
+                )
+                store.total_multi_intent_turns = (
+                    int(getattr(store, "total_multi_intent_turns", 0) or 0) + multi_intent_inc
+                )
+                store.total_product_searches = (
+                    int(getattr(store, "total_product_searches", 0) or 0) + product_inc
+                )
+                store.total_knowledge_searches = (
+                    int(getattr(store, "total_knowledge_searches", 0) or 0) + knowledge_inc
+                )
+                store.total_escalations = (
+                    int(getattr(store, "total_escalations", 0) or 0) + escalation_inc
+                )
                 await store.save(
                     update_fields=[
                         "total_input_tokens",
                         "total_output_tokens",
                         "total_cost_usd",
+                        "total_cached_input_tokens",
+                        "total_multi_intent_turns",
+                        "total_product_searches",
+                        "total_knowledge_searches",
+                        "total_escalations",
                     ]
                 )
         if session_id:
@@ -1717,12 +1818,28 @@ class  AppController:
                 sess.estimated_cost_usd_total = (
                     float(getattr(sess, "estimated_cost_usd_total", 0.0) or 0.0) + cost
                 )
+                sess.cached_input_tokens_total = (
+                    int(getattr(sess, "cached_input_tokens_total", 0) or 0) + tcached
+                )
+                sess.multi_intent_turns = (
+                    int(getattr(sess, "multi_intent_turns", 0) or 0) + multi_intent_inc
+                )
+                sess.product_searches_total = (
+                    int(getattr(sess, "product_searches_total", 0) or 0) + product_inc
+                )
+                sess.knowledge_searches_total = (
+                    int(getattr(sess, "knowledge_searches_total", 0) or 0) + knowledge_inc
+                )
                 sess.tokens_used = int(getattr(sess, "tokens_used", 0) or 0) + tin + tout
                 await sess.save(
                     update_fields=[
                         "input_tokens_total",
                         "output_tokens_total",
                         "estimated_cost_usd_total",
+                        "cached_input_tokens_total",
+                        "multi_intent_turns",
+                        "product_searches_total",
+                        "knowledge_searches_total",
                         "tokens_used",
                     ]
                 )
@@ -1735,8 +1852,22 @@ class  AppController:
             raise ApplicationError.NotFound("No store found")
         tin = int(getattr(store, "total_input_tokens", 0) or 0)
         tout = int(getattr(store, "total_output_tokens", 0) or 0)
+        tcached = int(getattr(store, "total_cached_input_tokens", 0) or 0)
         tcost = float(getattr(store, "total_cost_usd", 0.0) or 0.0)
-        from app.core.services.token_tracker import usd_to_inr, USD_TO_INR
+        from app.core.services.token_tracker import (
+            CACHED_INPUT_PRICE_FACTOR,
+            GEMINI_PRICING,
+            USD_TO_INR,
+            usd_to_inr,
+        )
+
+        pricing = GEMINI_PRICING.get("gemini-2.5-flash") or {"input": 0.30}
+        savings_usd = round(
+            (tcached / 1_000_000)
+            * float(pricing.get("input", 0.30))
+            * (1.0 - CACHED_INPUT_PRICE_FACTOR),
+            8,
+        )
         return APIResponse(
             success=True,
             message="LLM usage (tiktoken estimates; see token_usage.components per request for breakdown)",
@@ -1744,6 +1875,9 @@ class  AppController:
                 "store_id": store.id,
                 "total_input_tokens": tin,
                 "total_output_tokens": tout,
+                "total_cached_input_tokens": tcached,
+                "cache_savings_usd": savings_usd,
+                "cache_savings_inr": usd_to_inr(savings_usd),
                 "total_cost_usd": round(tcost, 8),
                 "total_cost_inr": usd_to_inr(tcost),
                 "currency": "INR",

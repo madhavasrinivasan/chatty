@@ -8,7 +8,11 @@ from typing import Any
 from app.core.models.dbontrollers.admindbcontroller import AdminDbContoller
 from app.core import models as Models
 from app.core.schema.applicationerror import ApplicationError
-from app.core.services.token_tracker import usd_to_inr
+from app.core.services.token_tracker import (
+    CACHED_INPUT_PRICE_FACTOR,
+    GEMINI_PRICING,
+    usd_to_inr,
+)
 
 TRIAL_DAYS = 14
 
@@ -115,8 +119,16 @@ async def build_billing_payload(user_id: int) -> dict[str, Any]:
     stores = await Models.ecom_store.filter(user_id=user_id).all()
     total_in = sum(int(getattr(s, "total_input_tokens", 0) or 0) for s in stores)
     total_out = sum(int(getattr(s, "total_output_tokens", 0) or 0) for s in stores)
+    total_cached = sum(int(getattr(s, "total_cached_input_tokens", 0) or 0) for s in stores)
     total_cost_usd = sum(float(getattr(s, "total_cost_usd", 0) or 0) for s in stores)
     total_cost_inr = usd_to_inr(total_cost_usd)
+    _pricing = GEMINI_PRICING.get("gemini-2.5-flash") or {"input": 0.30}
+    cache_savings_usd = round(
+        (total_cached / 1_000_000)
+        * float(_pricing.get("input", 0.30))
+        * (1.0 - CACHED_INPUT_PRICE_FACTOR),
+        8,
+    )
     balance_inr = float(wallet.balance_inr or 0)
     remaining_inr = max(0.0, round(balance_inr - total_cost_inr, 2))
 
@@ -146,9 +158,12 @@ async def build_billing_payload(user_id: int) -> dict[str, Any]:
         "usage": {
             "total_input_tokens": total_in,
             "total_output_tokens": total_out,
+            "total_cached_input_tokens": total_cached,
             "total_tokens": total_in + total_out,
             "total_cost_usd": round(total_cost_usd, 6),
             "total_cost_inr": total_cost_inr,
+            "cache_savings_usd": cache_savings_usd,
+            "cache_savings_inr": usd_to_inr(cache_savings_usd),
         },
         "remaining_inr": remaining_inr,
     }

@@ -36,6 +36,7 @@ async def init_db():
     await _upgrade_background_tasks_columns()
     await _upgrade_billing_tables()
     await _upgrade_tickets_table()
+    await _upgrade_analytics_columns()
 
     # Safe for prod: create missing tables without wiping data.
     # store_knowledge vector/tsvector columns come from SQL
@@ -120,6 +121,28 @@ async def _upgrade_tickets_table():
         print("✅ tickets_raised table ensured")
     except Exception as e:
         print(f"⚠️ tickets_raised table upgrade skipped or failed: {e}")
+
+
+async def _upgrade_analytics_columns():
+    """Add prompt-cache / multi-intent / knowledge / escalation counters if missing."""
+    try:
+        conn = connections.get("default")
+        await conn.execute_query("""
+            ALTER TABLE ecom_store
+              ADD COLUMN IF NOT EXISTS total_cached_input_tokens BIGINT NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS total_multi_intent_turns BIGINT NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS total_product_searches BIGINT NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS total_knowledge_searches BIGINT NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS total_escalations BIGINT NOT NULL DEFAULT 0;
+            ALTER TABLE chat_sessions
+              ADD COLUMN IF NOT EXISTS cached_input_tokens_total BIGINT NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS multi_intent_turns INTEGER NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS product_searches_total INTEGER NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS knowledge_searches_total INTEGER NOT NULL DEFAULT 0;
+        """)
+        print("✅ analytics columns ensured (store + session counters)")
+    except Exception as e:
+        print(f"⚠️ analytics columns upgrade skipped or failed: {e}")
 
 
 async def _upgrade_ecom_store_comez_fields():

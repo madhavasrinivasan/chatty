@@ -16,8 +16,10 @@ import asyncio
 import json
 from typing import Any
 
+from google.genai import types
+
 from app.core.config.config import settings
-from app.core.config.gemini_client import generate_content_text
+from app.core.config.gemini_client import get_genai_client
 from app.core.services.database_executor import execute_search
 from app.core.services.response_synthesis import get_variant_data_from_db
 from app.core.services.token_tracker import estimate_tokens
@@ -28,89 +30,103 @@ MAX_ROUNDS = 2
 MAX_TOOLS_PER_ROUND = 3
 SEARCH_LIMIT = 12
 
-TOOL_SPECS = [
-    {
-        "name": "search_catalog",
-        "description": (
-            "Search the store product catalog (keyword + optional semantic). "
-            "Handles cheapest/most expensive via sort_column/sort_order, and category via filters.category. "
-            "Use specific product terms from cart/past orders when recommending; "
-            "for price questions prefer empty semantic_context so SQL can sort by price."
-        ),
-        "parameters": {
-            "search_keywords": "string — core terms / category words (use OR for alternatives). Empty string OK for whole-catalog cheapest.",
-            "semantic_context": "string — vibe only; leave EMPTY when sorting by price (cheapest/lowest/expensive)",
-            "sort_column": '"price" | "created_at" | "rating" | null',
-            "sort_order": '"ASC" | "DESC" | null — ASC=cheapest, DESC=most expensive',
-            "limit": "int 1-20, default 12 (use 5 for cheapest/expensive)",
-            "color": "optional string",
-            "size": "optional string",
-            "category": "optional string — category/collection theme matched in title/content (e.g. towels, apparel)",
+def _build_catalog_tools() -> types.Tool:
+    """Native Gemini function declarations (no prompt-based JSON simulation)."""
+    search_params = types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "search_keywords": types.Schema(
+                type=types.Type.STRING,
+                description=(
+                    "Core product terms / category words. Use OR for alternatives. "
+                    "Empty string is OK for a whole-catalog cheapest query."
+                ),
+            ),
+            "semantic_context": types.Schema(
+                type=types.Type.STRING,
+                description=(
+                    "Vibe/concept terms only. Leave EMPTY when sorting by price "
+                    "(cheapest / lowest / most expensive)."
+                ),
+            ),
+            "sort_column": types.Schema(
+                type=types.Type.STRING,
+                enum=["price", "created_at", "rating"],
+                description="Column to sort by, or omit for relevance.",
+            ),
+            "sort_order": types.Schema(
+                type=types.Type.STRING,
+                enum=["ASC", "DESC"],
+                description="ASC = cheapest, DESC = most expensive / newest.",
+            ),
+            "limit": types.Schema(
+                type=types.Type.INTEGER,
+                description="How many products (1-20, default 12; use 5 for price sorts).",
+            ),
+            "color": types.Schema(type=types.Type.STRING, description="Optional color filter."),
+            "size": types.Schema(type=types.Type.STRING, description="Optional size filter."),
+            "category": types.Schema(
+                type=types.Type.STRING,
+                description="Optional category/theme matched in title or content (e.g. towels).",
+            ),
         },
-        "examples": [
-            {
-                "user": "find the cheapest product",
-                "args": {
-                    "search_keywords": "",
-                    "semantic_context": "",
-                    "sort_column": "price",
-                    "sort_order": "ASC",
-                    "limit": 5,
-                },
-            },
-            {
-                "user": "cheapest product in towels / muslin category",
-                "args": {
-                    "search_keywords": "towel OR muslin",
-                    "semantic_context": "",
-                    "sort_column": "price",
-                    "sort_order": "ASC",
-                    "category": "towel",
-                    "limit": 5,
-                },
-            },
-            {
-                "user": "most expensive blanket",
-                "args": {
-                    "search_keywords": "blanket",
-                    "semantic_context": "",
-                    "sort_column": "price",
-                    "sort_order": "DESC",
-                    "limit": 5,
-                },
-            },
-            {
-                "user": "recommend something like my muslin cart item",
-                "args": {
-                    "search_keywords": "muslin towel OR organic bath towel",
-                    "semantic_context": "complement to muslin receiving blanket",
-                    "sort_column": None,
-                    "sort_order": None,
-                    "limit": 12,
-                },
-            },
-        ],
-    },
-    {
-        "name": "get_product",
-        "description": (
-            "Load one product by catalog id, Comez/Shopify product id, or handle/slug. "
-            "Use after search when you need variants/options for a specific hit."
-        ),
-        "parameters": {
-            "product_id": "optional string — store_knowledge id or comez_*/Shopify id",
-            "handle": "optional string — product handle/slug",
+        required=["search_keywords"],
+    )
+    product_params = types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "product_id": types.Schema(
+                type=types.Type.STRING,
+                description="store_knowledge id or Comez/Shopify product id.",
+            ),
+            "handle": types.Schema(
+                type=types.Type.STRING,
+                description="Product handle/slug.",
+            ),
         },
-    },
-    {
-        "name": "get_order_status",
-        "description": (
-            "Live lookup for ONE order number when the user wants status/tracking "
-            "(e.g. A8081). Do not use just to list past orders — those are already in context."
-        ),
-        "parameters": {"order_number": "string — display order id without requiring #"},
-    },
-]
+    )
+    order_params = types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "order_number": types.Schema(
+                type=types.Type.STRING,
+                description="Display order id without requiring a leading #.",
+            ),
+        },
+        required=["order_number"],
+    )
+    return types.Tool(
+        function_declarations=[
+            types.FunctionDeclaration(
+                name="search_catalog",
+                description=(
+                    "Search the store product catalog (keyword + optional semantic). "
+                    "Handles cheapest/most expensive via sort_column/sort_order and "
+                    "category via the category filter. Use specific product terms from "
+                    "the cart/past orders when recommending; for price questions leave "
+                    "semantic_context empty so SQL can sort by price."
+                ),
+                parameters=search_params,
+            ),
+            types.FunctionDeclaration(
+                name="get_product",
+                description=(
+                    "Load one product by catalog id, Comez/Shopify product id, or "
+                    "handle/slug. Use after a search when you need variants/options."
+                ),
+                parameters=product_params,
+            ),
+            types.FunctionDeclaration(
+                name="get_order_status",
+                description=(
+                    "Live lookup for ONE order number when the user wants status or "
+                    "tracking. Do not use just to list past orders — those are already "
+                    "in context."
+                ),
+                parameters=order_params,
+            ),
+        ]
+    )
 
 
 def _summarize_cart(cart_items: list[dict[str, Any]] | None) -> str:
@@ -156,7 +172,7 @@ def _merge_hits(bucket: list[dict[str, Any]], rows: list[dict[str, Any]]) -> Non
         bucket.append(r)
 
 
-def _planner_prompt(
+def _planner_text(
     *,
     message: str,
     chat_history: list,
@@ -164,8 +180,6 @@ def _planner_prompt(
     user_facts: str,
     order_history: str,
     cart_items: list[dict[str, Any]] | None,
-    prior_tool_results: list[dict[str, Any]],
-    round_idx: int,
 ) -> str:
     hist = ""
     if chat_history:
@@ -174,13 +188,19 @@ def _planner_prompt(
         for m in tail:
             if not isinstance(m, dict):
                 continue
-            bits.append(f"{m.get('role')}: {(m.get('content') or '')[:200]}")
+            prod_bits = ""
+            prods = m.get("products")
+            if isinstance(prods, list) and prods:
+                prod_bits = " [shown: " + ", ".join(
+                    f"{(p.get('title') or 'item')} (id={p.get('product_id') or p.get('id')})"
+                    for p in prods[:5]
+                    if isinstance(p, dict)
+                ) + "]"
+            bits.append(f"{m.get('role')}: {(m.get('content') or '')[:200]}{prod_bits}")
         hist = "\n".join(bits)
 
-    prior = json.dumps(prior_tool_results[-6:], default=str)[:6000] if prior_tool_results else "[]"
-
     return f"""You are a catalog research agent for an e-commerce chatbot.
-Orders, cart, and facts are ALREADY loaded — do NOT ask for tools that re-fetch them.
+Orders, cart, and customer facts are ALREADY loaded — do NOT call tools to re-fetch them.
 Your job is better PRODUCT retrieval for a personalized recommendation.
 
 Store DNA: {store_dna or "online store"}
@@ -194,62 +214,28 @@ Recent chat:
 
 User message: {message}
 
-Round {round_idx + 1} of {MAX_ROUNDS}.
-Prior tool results (JSON): {prior}
+Use the available tools:
+- search_catalog: find products. Prefer specific keywords from cart titles / past order
+  themes (fabric, category, complementary items). Avoid vague terms like "baby products".
+  Cheapest/lowest/budget → sort_column="price", sort_order="ASC", semantic_context="".
+  Most expensive/premium → sort_column="price", sort_order="DESC", semantic_context="".
+  Category-scoped asks → use search_keywords and/or the category filter plus price sort.
+- get_product: load variants/options for one specific hit.
+- get_order_status: only when a specific order number should be looked up live.
 
-Available tools:
-{json.dumps(TOOL_SPECS, indent=2)}
-
-Decide:
-- If you still need better catalog matches or one product detail / one order status, output tool_calls.
-- If you have enough catalog hits to recommend (or tools already ran), output done=true and no tool_calls.
-
-Rules:
-- Prefer specific keywords drawn from cart titles / past order themes (fabric, category, complementary items).
-- Avoid vague search_keywords like "baby products" or "best products".
-- Cheapest / lowest / budget → sort_column=price, sort_order=ASC, semantic_context="".
-- Most expensive / premium → sort_column=price, sort_order=DESC, semantic_context="".
-- Category scoped (e.g. cheapest in towels) → set search_keywords AND/OR category filter, plus price sort.
-- Max {MAX_TOOLS_PER_ROUND} tool_calls this round; prefer search_catalog first.
-- get_order_status only when a specific order number should be looked up live.
-
-Output ONLY valid JSON:
-{{
-  "done": false,
-  "reason": "short why",
-  "tool_calls": [
-    {{"name": "search_catalog", "args": {{"search_keywords": "...", "semantic_context": "...", "limit": 12}}}}
-  ]
-}}
-OR
-{{
-  "done": true,
-  "reason": "enough results to answer",
-  "tool_calls": []
-}}
+Call at most {MAX_TOOLS_PER_ROUND} tools this round, preferring search_catalog first.
+If you already have enough catalog hits to recommend (or tools already ran), do NOT
+call any tools and reply briefly that you are done.
 """
 
 
-def _parse_planner(raw: str) -> dict[str, Any]:
+def _public_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Strip internal/synthesis-only keys and make the payload JSON-safe for Gemini."""
+    cleaned = {k: v for k, v in (result or {}).items() if not str(k).startswith("_")}
     try:
-        data = json.loads(raw or "{}")
+        return json.loads(json.dumps(cleaned, default=str))
     except Exception:
-        return {"done": True, "tool_calls": [], "reason": "parse_error"}
-    if not isinstance(data, dict):
-        return {"done": True, "tool_calls": [], "reason": "bad_shape"}
-    calls = data.get("tool_calls") or []
-    if not isinstance(calls, list):
-        calls = []
-    cleaned = []
-    for c in calls[:MAX_TOOLS_PER_ROUND]:
-        if not isinstance(c, dict):
-            continue
-        name = (c.get("name") or "").strip()
-        args = c.get("args") if isinstance(c.get("args"), dict) else {}
-        if name in ("search_catalog", "get_product", "get_order_status"):
-            cleaned.append({"name": name, "args": args})
-    done = bool(data.get("done")) or not cleaned
-    return {"done": done, "tool_calls": cleaned, "reason": data.get("reason")}
+        return {"ok": False, "message": "tool_result_not_serializable"}
 
 
 async def _tool_search_catalog(store_id: int, args: dict[str, Any]) -> dict[str, Any]:
@@ -419,7 +405,6 @@ async def run_catalog_tool_agent(
     """
     accumulated: list[dict[str, Any]] = []
     order_status: dict[str, Any] | None = None
-    prior_for_llm: list[dict[str, Any]] = []
     tool_trace: list[dict[str, Any]] = []
     usage_parts: list[dict[str, dict[str, int]]] = []
 
@@ -448,96 +433,138 @@ async def run_catalog_tool_agent(
             rows = await execute_search(store_id=store_id, payload=seed)
             _merge_hits(accumulated, rows)
             compact = _compact_search_rows(rows)
-            prior_for_llm.append({"tool": "search_catalog", "seed": True, "count": len(compact), "products": compact})
             tool_trace.append({"name": "search_catalog", "seed": True, "count": len(compact)})
         except Exception as e:
             print(f"catalog agent seed search failed: {e}")
 
-    for round_idx in range(MAX_ROUNDS):
-        prompt = _planner_prompt(
-            message=message,
-            chat_history=chat_history or [],
-            store_dna=store_dna,
-            user_facts=user_facts,
-            order_history=order_history,
-            cart_items=cart_items,
-            prior_tool_results=prior_for_llm,
-            round_idx=round_idx,
+    # Native Gemini function calling: the model returns structured function_calls
+    # instead of JSON we have to parse/repair ourselves.
+    tools = [_build_catalog_tools()]
+    client = get_genai_client()
+    contents: list[types.Content] = [
+        types.Content(
+            role="user",
+            parts=[
+                types.Part.from_text(
+                    text=_planner_text(
+                        message=message,
+                        chat_history=chat_history or [],
+                        store_dna=store_dna,
+                        user_facts=user_facts,
+                        order_history=order_history,
+                        cart_items=cart_items,
+                    )
+                )
+            ],
         )
+    ]
+
+    def _call_planner() -> Any:
+        return client.models.generate_content(
+            model=MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                tools=tools,
+                temperature=0.1,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+                max_output_tokens=512,
+            ),
+        )
+
+    async def _run_one(call: dict[str, Any]) -> dict[str, Any]:
+        name = call["name"]
+        args = call.get("args") or {}
+        if name == "search_catalog":
+            return await _tool_search_catalog(store_id, args)
+        if name == "get_product":
+            return await _tool_get_product(store_id=store_id, adapter=adapter, args=args)
+        if name == "get_order_status":
+            return await _tool_get_order_status(adapter, args)
+        return {"ok": False, "tool": name, "message": "unknown tool"}
+
+    for round_idx in range(MAX_ROUNDS):
         try:
-            raw = await asyncio.to_thread(
-                generate_content_text,
-                MODEL,
-                prompt,
-                {
-                    "response_mime_type": "application/json",
-                    "thinking_config": {"thinking_budget": 0},
-                    "max_output_tokens": 512,
-                },
-            )
+            response = await asyncio.to_thread(_call_planner)
         except Exception as e:
             print(f"catalog agent planner failed: {e}")
             break
 
+        usage_meta = getattr(response, "usage_metadata", None)
         usage_parts.append(
             {
                 f"catalog_agent_round_{round_idx}": {
-                    "input_tokens": estimate_tokens(prompt),
-                    "output_tokens": estimate_tokens(raw or ""),
+                    "input_tokens": int(
+                        getattr(usage_meta, "prompt_token_count", 0) or 0
+                    )
+                    or estimate_tokens(str(contents[-1])),
+                    "output_tokens": int(
+                        getattr(usage_meta, "candidates_token_count", 0) or 0
+                    )
+                    or estimate_tokens(getattr(response, "text", "") or ""),
+                    "cached_input_tokens": int(
+                        getattr(usage_meta, "cached_content_token_count", 0) or 0
+                    ),
                 }
             }
         )
-        plan = _parse_planner(raw or "")
-        print(f"🛒 catalog_agent round={round_idx} plan={plan}")
-        if plan.get("done") or not plan.get("tool_calls"):
+
+        function_calls = list(getattr(response, "function_calls", None) or [])
+        print(
+            f"🛒 catalog_agent round={round_idx} "
+            f"function_calls={[fc.name for fc in function_calls]}"
+        )
+        if not function_calls:
             break
 
-        async def _run_one(call: dict[str, Any]) -> dict[str, Any]:
-            name = call["name"]
-            args = call.get("args") or {}
-            if name == "search_catalog":
-                return await _tool_search_catalog(store_id, args)
-            if name == "get_product":
-                return await _tool_get_product(store_id=store_id, adapter=adapter, args=args)
-            if name == "get_order_status":
-                return await _tool_get_order_status(adapter, args)
-            return {"ok": False, "tool": name, "message": "unknown tool"}
-
+        function_calls = function_calls[:MAX_TOOLS_PER_ROUND]
+        calls = [
+            {"name": fc.name, "args": dict(fc.args or {})} for fc in function_calls
+        ]
         results = await asyncio.gather(
-            *[_run_one(c) for c in plan["tool_calls"]],
+            *[_run_one(c) for c in calls],
             return_exceptions=True,
         )
 
-        for res in results:
+        # Echo the model's tool-call turn back, then append tool results.
+        candidates = getattr(response, "candidates", None) or []
+        if candidates and getattr(candidates[0], "content", None) is not None:
+            contents.append(candidates[0].content)
+
+        function_response_parts: list[types.Part] = []
+        for fc, res in zip(function_calls, results):
             if isinstance(res, Exception):
-                prior_for_llm.append({"ok": False, "message": str(res)})
-                tool_trace.append({"error": str(res)})
-                continue
-            # Keep full rows for synthesis; strip _* for next planner prompt
-            if res.get("tool") == "search_catalog":
-                rows = res.pop("_rows", None) or []
-                _merge_hits(accumulated, rows)
-            elif res.get("tool") == "get_product":
-                row = res.pop("_row", None)
-                if row:
-                    _merge_hits(accumulated, [row])
-            elif res.get("tool") == "get_order_status":
-                full = res.pop("_order_status", None)
-                if isinstance(full, dict):
-                    order_status = full
-            prior_for_llm.append(res)
-            tool_trace.append(
-                {
-                    "name": res.get("tool"),
-                    "ok": res.get("ok"),
-                    "count": res.get("count"),
-                }
+                payload: dict[str, Any] = {"ok": False, "error": str(res)}
+                tool_trace.append({"name": fc.name, "error": str(res)})
+            else:
+                if res.get("tool") == "search_catalog":
+                    rows = res.pop("_rows", None) or []
+                    _merge_hits(accumulated, rows)
+                elif res.get("tool") == "get_product":
+                    row = res.pop("_row", None)
+                    if row:
+                        _merge_hits(accumulated, [row])
+                elif res.get("tool") == "get_order_status":
+                    full = res.pop("_order_status", None)
+                    if isinstance(full, dict):
+                        order_status = full
+                payload = _public_result(res)
+                tool_trace.append(
+                    {
+                        "name": res.get("tool") or fc.name,
+                        "ok": res.get("ok"),
+                        "count": res.get("count"),
+                    }
+                )
+            function_response_parts.append(
+                types.Part.from_function_response(
+                    name=fc.name,
+                    response={"result": payload},
+                )
             )
 
-        # If we already have a healthy set of hits, stop early next planner will likely done=true
-        if len(accumulated) >= 8:
-            # One more planner chance only if rounds remain; otherwise exit
-            pass
+        contents.append(
+            types.Content(role="user", parts=function_response_parts)
+        )
 
     # Fallback: if agent found nothing, one last generic search from the user message
     if not accumulated:

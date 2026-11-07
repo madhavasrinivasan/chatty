@@ -997,6 +997,7 @@ async def process_user_query(
         route_result = {"route": "HYBRID_SEARCH", "extracted_order_number": None, "search_payload": _default_search_payload(message or "")}
     router_usage = route_result.pop("_usage", {})
     jev_meta = route_result.pop("_jev", None) or {}
+    intents = route_result.pop("intents", None) or jev_meta.get("intents") or {}
     needs_expander = bool(route_result.pop("needs_expander", False) or jev_meta.get("needs_expander"))
 
     route = route_result.get("route") if isinstance(route_result, dict) else None
@@ -1008,6 +1009,33 @@ async def process_user_query(
     elif plan_normalized in ("starter", "basic") and route in ("GRAPH_SEARCH", "PARALLEL_SEARCH"):
         route = "HYBRID_SEARCH"
 
+    # Derive intents when the router was Gemini (no Jev multi-label output).
+    if not intents:
+        try:
+            from app.core.services.jev_router import (
+                detect_knowledge_ask,
+                detect_sort_heuristic,
+            )
+
+            k = detect_knowledge_ask(message or "")
+            s = bool(detect_sort_heuristic(message or ""))
+            seed_payload = route_result.get("search_payload") or {}
+            productish = (
+                route in ("HYBRID_SEARCH", "CATALOG_AGENT")
+                and seed_payload.get("search_scope") != "knowledge"
+                and (bool(seed_payload.get("search_keywords")) or s)
+            )
+            intents = {
+                "needs_products": bool(s or productish or (route in ("HYBRID_SEARCH", "CATALOG_AGENT") and not k)),
+                "needs_knowledge": bool(k),
+                "needs_order_status": bool(
+                    route == "ORDER_SUPPORT" and extracted_order_number
+                ),
+                "is_return_request": route == "RETURN_REQUEST",
+            }
+        except Exception:
+            intents = {}
+
     # Heuristic upgrade: personalized recommend + cart/orders → catalog agent
     # (also catches GENERAL_CHAT / FOLLOW_UP / empty ORDER_SUPPORT mis-routes)
     if _should_upgrade_to_catalog_agent(message or "", order_history or "", cart_items):
@@ -1018,6 +1046,8 @@ async def process_user_query(
             if not route_result.get("search_payload"):
                 route_result["search_payload"] = _default_search_payload(message or "")
             needs_expander = True  # personalized seed benefits from store-DNA expand
+            if isinstance(intents, dict):
+                intents["needs_products"] = True
             print("🛒 upgraded → CATALOG_AGENT (personalized catalog)")
 
     # Gemini QueryExpander builds keywords/filters/RRF (including knowledge scope)
@@ -1080,6 +1110,19 @@ async def process_user_query(
             print(f"[EXPAND] failed, keeping Jev payload: {exp_err}", flush=True)
     elif route in ("HYBRID_SEARCH", "CATALOG_AGENT"):
         print("[EXPAND] skipped — Jev needs_expander=false", flush=True)
+
+    # Compound asks (products + policies) need a second, knowledge-scoped lookup.
+    multi_intent = bool(intents.get("needs_products") and intents.get("needs_knowledge"))
+    knowledge_search_payload = None
+    if multi_intent and route in ("HYBRID_SEARCH", "CATALOG_AGENT"):
+        try:
+            from app.core.services.jev_router import build_search_payload_from_jev
+
+            knowledge_search_payload = build_search_payload_from_jev(
+                message or "", "none", "knowledge"
+            )
+        except Exception as e:
+            print(f"[MULTI] knowledge payload build failed: {e}", flush=True)
 
     def _with_usage(extra: dict[str, dict[str, int]] | None = None) -> dict[str, Any]:
         comps = merge_token_components(router_usage, extra)
@@ -1225,6 +1268,9 @@ async def process_user_query(
             "route": "CATALOG_AGENT",
             "search_results": agent_out.get("search_results") or [],
             "search_payload": route_result.get("search_payload"),
+            "knowledge_search_payload": knowledge_search_payload,
+            "multi_intent": multi_intent,
+            "intents": intents,
             "order_status": agent_out.get("order_status"),
             "tool_trace": agent_out.get("tool_trace") or [],
             "discounts": discounts,
@@ -1251,6 +1297,9 @@ async def process_user_query(
         return {
             "route": "HYBRID_SEARCH",
             "search_payload": payload,
+            "knowledge_search_payload": knowledge_search_payload,
+            "multi_intent": multi_intent,
+            "intents": intents,
             "discounts": discounts,
             "wants_discounts": wants_discounts,
             "token_usage": _with_usage(),
