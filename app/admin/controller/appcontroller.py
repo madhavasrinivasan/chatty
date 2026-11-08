@@ -38,7 +38,7 @@ from app.core.services.shopify_service import (
 from app.core.services.token_tracker import merge_token_usage_payload
 from app.core.services.shopify_return_service import ShopifyReturnService
 from jose import jwt as jose_jwt
-from jose.exceptions import JWTError
+from jose.exceptions import ExpiredSignatureError, JWTError
 from app.core.models.models import (
     ecom_store,
     store_knowledge,
@@ -122,22 +122,41 @@ class  AppController:
         Raises ApplicationError.Unauthorized on invalid or expired key.
         """
         if not api_key or not api_key.strip():
-            raise ApplicationError.Unauthorized("Invalid or expired API key")
+            raise ApplicationError.Unauthorized("API key is missing")
+        clean_key = api_key.strip()
+        print(
+            "decode key: "
+            f"len={len(clean_key)} prefix={clean_key[:6]!r} suffix={clean_key[-6:]!r} "
+            f"spaces={' ' in clean_key} newlines={chr(10) in clean_key or chr(13) in clean_key}",
+            flush=True,
+        )
         try:
-            jwt_string = decrypt_token(api_key.strip())
+            jwt_string = decrypt_token(clean_key)
+        except Exception as e:
+            print(f"decode_chatbot_api_key decrypt error: {type(e).__name__}: {e}", flush=True)
+            raise ApplicationError.Unauthorized(
+                "Embed key could not be decrypted. Generate a new key on this server."
+            )
+        try:
             payload = jose_jwt.decode(
                 jwt_string,
                 settings.jwt_secret,
                 algorithms=[settings.jwt_algorithm],
             )
-            user_id = payload.get("user_id")
-            chatbot_id = payload.get("chatbot_id")
-            if user_id is None or chatbot_id is None:
-                raise ApplicationError.Unauthorized("Invalid or expired API key")
-            return {"id": user_id, "chatbot_id": chatbot_id}
-        except (JWTError, ValueError, Exception) as e:
-            print(f"decode_chatbot_api_key error: {e}")
-            raise ApplicationError.Unauthorized("Invalid or expired API key")
+        except ExpiredSignatureError:
+            raise ApplicationError.Unauthorized("Embed key has expired")
+        except JWTError as e:
+            print(f"decode_chatbot_api_key jwt error: {type(e).__name__}: {e}", flush=True)
+            raise ApplicationError.Unauthorized(
+                "Embed key signature is invalid. Generate a new key on this server."
+            )
+        user_id = payload.get("user_id")
+        chatbot_id = payload.get("chatbot_id")
+        if user_id is None or chatbot_id is None:
+            raise ApplicationError.Unauthorized(
+                "Embed key is missing its chatbot identity. Generate a new key."
+            )
+        return {"id": user_id, "chatbot_id": chatbot_id}
 
     @staticmethod
     async def validate_chatbot_api_key(request: Request) -> dict:
@@ -2375,6 +2394,45 @@ class  AppController:
                 "store_type": str(getattr(store_type, "value", store_type) or "") or None,
             },
         )
+
+    @staticmethod
+    async def rotate_chatbot_embed(user: dict):
+        """Generate a fresh embed key on the current server.
+
+        Useful when the key was created with different SECRET_KEY/JWT_SECRET
+        values (for example, generated locally but used against production).
+        """
+        store = (
+            await ecom_store.filter(user_id=user["id"], store_type="website")
+            .order_by("-id")
+            .first()
+        )
+        if store is None:
+            store = await AdminDbContoller().find_first_ecom_store_by_user_id(user["id"])
+        if not store:
+            raise ApplicationError.NotFound("No store found")
+
+        chatbot = None
+        if getattr(store, "chatbot_id", None):
+            chatbot = await chatbot_settings.filter(id=store.chatbot_id).first()
+        if chatbot is None:
+            chatbot = (
+                await chatbot_settings.filter(user_id=user["id"])
+                .order_by("-id")
+                .first()
+            )
+        if chatbot is None:
+            raise ApplicationError.NotFound("No chatbot found")
+
+        token = JWTService().generate_token({
+            "user_id": user["id"],
+            "username": user.get("username") or user.get("email") or str(user["id"]),
+            "chatbot_id": chatbot.id,
+        })
+        await AdminDbContoller().update_chatbot(
+            chatbot.id, {"api_key": encrypt_token(token)}
+        )
+        return await AppController.get_chatbot_embed(user)
 
     @staticmethod
     async def get_chatbot_embed(user: dict):

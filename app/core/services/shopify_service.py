@@ -91,9 +91,18 @@ def encrypt_token(token: str) -> str:
 
 
 def decrypt_token(encrypted: str) -> str:
-    """Decrypt a string produced by encrypt_token; returns the original JWT/token string."""
+    """Decrypt a string produced by encrypt_token; returns the original JWT/token string.
+
+    Tolerates whitespace, URL-decoded plus signs (spaces), and missing base64
+    padding. These commonly happen when the embed key passes through HTML,
+    query strings, dashboards, or copy/paste.
+    """
     key = hashlib.sha256((settings.secret_key or "default-secret").encode()).digest()
-    raw = base64.b64decode(encrypted)
+    cleaned = (encrypted or "").strip()
+    # A base64 string never contains spaces; in URL-encoded values '+' becomes ' '.
+    cleaned = cleaned.replace(" ", "+").replace("\n", "").replace("\r", "")
+    cleaned += "=" * (-len(cleaned) % 4)
+    raw = base64.b64decode(cleaned)
     iv, ct = raw[:16], raw[16:]
     cipher = AES.new(key, AES.MODE_CBC, iv)
     return unpad(cipher.decrypt(ct), AES.block_size).decode("utf-8")

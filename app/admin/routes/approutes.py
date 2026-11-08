@@ -720,6 +720,15 @@ async def get_chatbot_embed(user: dict = Depends(AppController.validate_user)):
     """Public widget key + copy-paste embed snippet for the merchant dashboard."""
     return await AppController.get_chatbot_embed(user)
 
+
+@adminapprouter.post("/chatbot/embed/rotate", response_model=APIResponse)
+async def rotate_chatbot_embed(user: dict = Depends(AppController.validate_user)):
+    """Regenerate the embed key using the current server secrets.
+
+    Existing embeds with the old key stop working.
+    """
+    return await AppController.rotate_chatbot_embed(user)
+
 @adminapprouter.post("/addwebsite", response_model=APIResponse)
 async def add_website(request: AddWebsiteRequest, user: dict = Depends(AppController.validate_user)):
     """Create a website chatbot (PDF Q&A + lead capture, no ecommerce)."""
