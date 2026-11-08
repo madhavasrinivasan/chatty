@@ -224,7 +224,8 @@ class  AppController:
              # Create background task in database (will be picked up by polling worker)
              # Signature: create_background_task(user_id, chatbot_id, task_data)
              task_data = {
-                 "urls": request.urls if request.urls else [],
+                 # PDF-only ingestion: web crawling is disabled.
+                 "urls": [],
                  "files": files,
                  "source_name": (getattr(request, "name", None) or "").strip() or None,
              }
@@ -359,34 +360,15 @@ class  AppController:
                                 "content_hash": hashlib.md5(ch.page_content.encode()).hexdigest(),
                             })
 
-            # --- Optional URLs → custom chunks (same store_knowledge path) ---
-            if urls and len(urls) > 0:
-                crawl_results = await Services.crawlweb(urls)
-                crawled_docs = await Services.crawl_results_to_documents(
-                    crawl_results, {"chatbot_id": chatbot_id, "user_id": user_id}
+            # --- URLs are intentionally ignored: web crawling is disabled. ---
+            # Only uploaded PDFs are ingested. This keeps website knowledge
+            # deterministic and avoids a full task failure when the optional URL
+            # field is present in an older client payload.
+            if urls:
+                print(
+                    "ℹ️ Web crawling is disabled; ignoring URL sources and ingesting PDFs only.",
+                    flush=True,
                 )
-                for idx, node in enumerate(crawled_docs):
-                    page_content = (node.get("page_content") or "").strip()
-                    if not page_content:
-                        continue
-                    meta = node.get("metadata") or {}
-                    url = meta.get("url") or f"url_{idx}"
-                    title = display_name or meta.get("title") or url
-                    handle = re.sub(r"[^a-z0-9\-]+", "-", str(title).lower()).strip("-")[:200] or "custom-url"
-                    url_hash = hashlib.md5(f"{store_id}:{url}".encode()).hexdigest()[:10]
-                    content = f"Custom document: {title}. Source: {url}.\n\n{page_content}"
-                    doc = LangchainDocument(page_content=content, metadata={"title": title, "url": url})
-                    chunks = splitter.split_documents([doc])
-                    for j, ch in enumerate(chunks):
-                        source_id = f"c{store_id}_{url_hash}_u{idx}_c{j}"[:50]
-                        all_chunks.append({
-                            "source_id": source_id,
-                            "handle": handle,
-                            "title": str(title)[:500],
-                            "content": ch.page_content,
-                            "url": url,
-                            "content_hash": hashlib.md5(ch.page_content.encode()).hexdigest(),
-                        })
 
             if not all_chunks:
                 detail = (
@@ -395,7 +377,8 @@ class  AppController:
                     else ""
                 )
                 raise ApplicationError.BadRequest(
-                    "No readable text was extracted from the uploaded PDFs."
+                    "No readable text was extracted from the uploaded PDFs. "
+                    "Upload at least one text-based PDF; web crawling is disabled."
                     + detail
                 )
 
