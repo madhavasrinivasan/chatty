@@ -173,16 +173,18 @@ class  AppController:
                  if chatbot is None:
                      raise ApplicationError.NotFound("Chatbot not found for this user")
              if chatbot is None:
-                 # Reuse the user's website bot when one exists; otherwise create.
+                 # Reuse the existing store's chatbot. Never create an orphan
+                 # chatbot: its vectors would otherwise attach to a different
+                 # store and disappear from the website bot's knowledge view.
                  store = await AdminDbContoller().find_first_ecom_store_by_user_id(user["id"])
-                 store_type = str(
-                     getattr(getattr(store, "store_type", None), "value", getattr(store, "store_type", ""))
-                     or ""
-                 ).lower()
-                 if store and store_type == "website" and getattr(store, "chatbot_id", None):
-                     chatbot = await chatbot_settings.filter(id=store.chatbot_id).first()
+                 if store and getattr(store, "chatbot_id", None):
+                     chatbot = await chatbot_settings.filter(
+                         id=store.chatbot_id, user_id=user["id"]
+                     ).first()
              if chatbot is None:
-                 chatbot = await AdminDbContoller().create_chatbot(user)
+                 raise ApplicationError.BadRequest(
+                     "Connect a store before uploading knowledge"
+                 )
 
              print(f"Chatbot: {chatbot}")
 
@@ -275,16 +277,28 @@ class  AppController:
             store = None
             if chatbot_id:
                 store = await controller.find_one_ecom_store(chatbot_id)
+                if store is None:
+                    raise ApplicationError.BadRequest(
+                        f"No store is linked to chatbot {chatbot_id}. "
+                        "Create or reconnect the store, then upload again."
+                    )
             if store is None and user_id:
                 store = await controller.find_first_ecom_store_by_user_id(user_id)
             if not store:
                 raise ApplicationError.NotFound(
-                    "No ecom store found for this merchant; connect Shopify before uploading custom PDFs"
+                    "No ecom store found for this merchant; connect a store before uploading custom PDFs"
                 )
             store_id = store.id
+            print(
+                f"📚 Custom knowledge target: store_id={store_id} "
+                f"store_type={getattr(store, 'store_type', None)} chatbot_id={chatbot_id} "
+                f"files={len(files or [])} urls={len(urls or [])}",
+                flush=True,
+            )
             display_name = (source_name or "").strip()
 
             all_chunks: list[dict] = []
+            missing_files: list[str] = []
 
             # --- PDFs → custom chunks (max 50 pages, enforced in extract) ---
             if files and len(files) > 0:
@@ -295,6 +309,7 @@ class  AppController:
                     full_pdf_path = os.path.join(directory, pdf_path)
                     if not os.path.isfile(full_pdf_path):
                         print(f"PDF not found on disk: {full_pdf_path}", flush=True)
+                        missing_files.append(str(full_pdf_path))
                         continue
                     try:
                         pdf_docs = await Services.extract_pdf_pages_readable(
@@ -302,6 +317,10 @@ class  AppController:
                         )
                     except ValueError as ve:
                         raise ApplicationError.BadRequest(str(ve))
+                    print(
+                        f"📄 Extracted {len(pdf_docs)} readable pages from {pdf_path}",
+                        flush=True,
+                    )
 
                     doc_label = display_name or os.path.splitext(str(pdf_path))[0]
                     file_hash = hashlib.md5(f"{store_id}:{pdf_path}".encode()).hexdigest()[:10]
@@ -370,10 +389,21 @@ class  AppController:
                         })
 
             if not all_chunks:
-                print("No custom chunks to embed", flush=True)
-                return
+                detail = (
+                    f" Missing files: {', '.join(missing_files)}."
+                    if missing_files
+                    else ""
+                )
+                raise ApplicationError.BadRequest(
+                    "No readable text was extracted from the uploaded PDFs."
+                    + detail
+                )
 
-            print(f"Embedding {len(all_chunks)} custom chunks into store_knowledge (store_id={store_id})", flush=True)
+            print(
+                f"Embedding {len(all_chunks)} custom chunks into store_knowledge "
+                f"(store_id={store_id})",
+                flush=True,
+            )
             batch_size = 32
             for start in range(0, len(all_chunks), batch_size):
                 batch = all_chunks[start : start + batch_size]
