@@ -4,7 +4,7 @@ from app.core.models.dbontrollers.admindbcontroller import AdminDbContoller
 from app.core.schema.schema import RegisterRequest, LoginRequest, llmrequest, AddshopifyRequest, OrchestratorRequest, FinalFrontendResponse
 from app.core.schema.schemarespone import APIResponse
 from app.core.schema.applicationerror import ApplicationError
-from fastapi import Request, BackgroundTasks
+from fastapi import Request, BackgroundTasks, Response
 from app.core.services.jwt import JWTService
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
@@ -39,10 +39,21 @@ from app.core.services.token_tracker import merge_token_usage_payload
 from app.core.services.shopify_return_service import ShopifyReturnService
 from jose import jwt as jose_jwt
 from jose.exceptions import JWTError
-from app.core.models.models import ecom_store, store_knowledge, chatbot_settings, ChatTranscript, ChatSession, ChatMessage, TicketsRaised
+from app.core.models.models import (
+    ecom_store,
+    store_knowledge,
+    chatbot_settings,
+    ChatTranscript,
+    ChatSession,
+    ChatMessage,
+    TicketsRaised,
+    Lead,
+)
 import bcrypt
 import re
 import base64
+import csv
+import io
 import time
 import os
 from datetime import datetime, timedelta, timezone
@@ -153,7 +164,25 @@ class  AppController:
              print(f"File path: {file_path}")
              print(f"Request: {request}")
              print(f"Background tasks: {background_tasks}")
-             chatbot = await AdminDbContoller().create_chatbot(user)
+             chatbot = None
+             requested_chatbot_id = getattr(request, "chatbot_id", None)
+             if requested_chatbot_id:
+                 chatbot = await chatbot_settings.filter(
+                     id=requested_chatbot_id, user_id=user["id"]
+                 ).first()
+                 if chatbot is None:
+                     raise ApplicationError.NotFound("Chatbot not found for this user")
+             if chatbot is None:
+                 # Reuse the user's website bot when one exists; otherwise create.
+                 store = await AdminDbContoller().find_first_ecom_store_by_user_id(user["id"])
+                 store_type = str(
+                     getattr(getattr(store, "store_type", None), "value", getattr(store, "store_type", ""))
+                     or ""
+                 ).lower()
+                 if store and store_type == "website" and getattr(store, "chatbot_id", None):
+                     chatbot = await chatbot_settings.filter(id=store.chatbot_id).first()
+             if chatbot is None:
+                 chatbot = await AdminDbContoller().create_chatbot(user)
 
              print(f"Chatbot: {chatbot}")
 
@@ -1744,6 +1773,343 @@ class  AppController:
             raise ApplicationError.SomethingWentWrong(error_message)
 
     # ============================
+    # Website chatbot (PDF Q&A + lead capture)
+    # ============================
+
+    @staticmethod
+    def _normalize_origin(value: str | None) -> str:
+        from urllib.parse import urlparse
+
+        raw = (value or "").strip()
+        if not raw:
+            return ""
+        if not raw.startswith("http://") and not raw.startswith("https://"):
+            raw = f"https://{raw}"
+        parsed = urlparse(raw)
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}".rstrip("/")
+        return raw.rstrip("/").lower()
+
+    @staticmethod
+    def _origin_allowed(origin: str | None, allowed_origins: list | None) -> bool:
+        allowed = [
+            AppController._normalize_origin(str(o))
+            for o in (allowed_origins or [])
+            if str(o or "").strip()
+        ]
+        if not allowed:
+            # Nothing configured yet: allow during setup, but the admin UI warns
+            # the merchant to add their domain before going live.
+            return True
+        if "*" in allowed:
+            return True
+        candidate = AppController._normalize_origin(origin)
+        return bool(candidate) and candidate in allowed
+
+    @staticmethod
+    def _enforce_origin(origin: str | None, allowed_origins: list | None) -> None:
+        if not allowed_origins and str(settings.env).lower() == "production":
+            raise ApplicationError.Forbidden(
+                "No allowed origins configured for this embed key"
+            )
+        if not AppController._origin_allowed(origin, allowed_origins):
+            raise ApplicationError.Forbidden("Origin is not allowed for this embed key")
+
+    @staticmethod
+    async def _website_store_for_user(user: dict):
+        chatbot_id = user.get("chatbot_id")
+        store = None
+        if chatbot_id:
+            store = await AdminDbContoller().find_one_ecom_store(chatbot_id)
+        if store is None:
+            store = await AdminDbContoller().find_first_ecom_store_by_user_id(user["id"])
+        if not store:
+            raise ApplicationError.NotFound("No website store found")
+        store_type = str(getattr(getattr(store, "store_type", None), "value", getattr(store, "store_type", "")) or "").lower()
+        if store_type != "website":
+            raise ApplicationError.BadRequest("This endpoint is for website chatbots only")
+        return store
+
+    @staticmethod
+    async def add_website(request, user: dict):
+        """Create a website chatbot: store record + key + allowed origins."""
+        try:
+            site_name = (getattr(request, "site_name", "") or "").strip()
+            if not site_name:
+                raise ApplicationError.BadRequest("site_name is required")
+            domain = AppController._normalize_origin(getattr(request, "domain", None))
+            origins = [
+                AppController._normalize_origin(o)
+                for o in (getattr(request, "allowed_origins", None) or [])
+                if str(o or "").strip()
+            ]
+            if domain and domain not in origins:
+                origins.append(domain)
+            bot_name = (getattr(request, "bot_name", None) or "").strip() or site_name
+
+            controller = AdminDbContoller()
+            chatbot = await controller.create_chatbot({"id": user["id"]})
+            token = JWTService().generate_token({
+                "user_id": user["id"],
+                "username": user.get("username") or user.get("email") or str(user["id"]),
+                "chatbot_id": chatbot.id,
+            })
+            encrypted_api_key = encrypt_token(token)
+            await controller.update_chatbot(
+                chatbot.id,
+                {"api_key": encrypted_api_key, "allowed_url": origins},
+            )
+
+            slug = re.sub(r"[^a-z0-9]+", "_", site_name.lower()).strip("_")[:80] or f"site_{chatbot.id}"
+            store = await controller.create_ecom_store(
+                user_id=user["id"],
+                chatbot_id=chatbot.id,
+                store_id=f"website_{slug}",
+                store_name=site_name,
+                access_token=None,
+                refresh_token=None,
+                expires_at=None,
+                store_type="website",
+                storefront_url=domain or None,
+                custom_domain=False,
+                x_store=None,
+            )
+            await controller.update_chatbot_customization(
+                store.id, {"bot_name": bot_name}
+            )
+
+            api_path = "/admin/app/website/chat"
+            api_url = f"{settings.public_api_base_url.rstrip('/')}{api_path}"
+            snippet = (
+                f'<chatbot-widget\n'
+                f'  data-api-key="{encrypted_api_key}"\n'
+                f'  data-api-url="{api_url}"\n'
+                f'  data-header="{bot_name.replace(chr(34), "&quot;")}"\n'
+                f'></chatbot-widget>\n'
+                f'<script type="module" src="{settings.widget_script_url}"></script>'
+            )
+            return APIResponse(
+                success=True,
+                message="Website chatbot created",
+                data={
+                    "store_id": store.id,
+                    "store_name": site_name,
+                    "domain": domain or None,
+                    "allowed_origins": origins,
+                    "store_type": "website",
+                    "chatbot_id": chatbot.id,
+                    "api_key": encrypted_api_key,
+                    "api_url": api_url,
+                    "snippet": snippet,
+                },
+            )
+        except ApplicationError:
+            raise
+        except Exception as exc:
+            print(f"error adding website: {exc}")
+            raise ApplicationError.SomethingWentWrong(str(exc))
+
+    @staticmethod
+    async def website_chat(request, user: dict, http_request: Request):
+        """Knowledge-only Q&A for website chatbots (no ecommerce pipeline)."""
+        from app.core.services.website_qa import (
+            answer_website_question,
+            search_website_knowledge,
+        )
+
+        store = await AppController._website_store_for_user(user)
+        chatbot = None
+        if getattr(store, "chatbot_id", None):
+            chatbot = await chatbot_settings.filter(id=store.chatbot_id).first()
+        origin = (
+            http_request.headers.get("origin")
+            or http_request.headers.get("referer")
+            or ""
+        )
+        allowed = getattr(chatbot, "allowed_url", None) if chatbot else None
+        AppController._enforce_origin(origin, allowed)
+
+        from app.core.services.rate_limit import allow as rate_allow
+
+        forwarded = (http_request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        client_ip = forwarded or (http_request.client.host if http_request.client else "")
+        if not await rate_allow(
+            f"website-chat:{user.get('chatbot_id')}:{client_ip}",
+            limit=int(getattr(settings, "rate_limit_per_minute", 60) or 60),
+        ):
+            raise ApplicationError.TooManyRequests()
+
+        message = (getattr(request, "message", "") or "").strip()
+        if not message:
+            raise ApplicationError.BadRequest("message is required")
+
+        try:
+            rows = await search_website_knowledge(store.id, message)
+        except Exception as search_err:
+            print(f"website knowledge search failed: {search_err}", flush=True)
+            rows = []
+        custom = await AdminDbContoller().get_chatbot_customization(store.id)
+        result = await answer_website_question(
+            message=message,
+            rows=rows,
+            store_name=store.store_name or "this website",
+            bot_name=getattr(custom, "bot_name", None) or "Assistant",
+        )
+        raw_session_id = (getattr(request, "session_id", None) or "").strip()
+        try:
+            session_uuid = uuid.UUID(raw_session_id)
+        except (ValueError, TypeError):
+            session_uuid = uuid.uuid4()
+        result["session_id"] = str(session_uuid)
+        result["route"] = "WEBSITE_QA"
+
+        # Persist the lightweight transcript so Sessions + dashboard counts work.
+        try:
+            shop_domain = AdminDbContoller()._normalize_shop_domain(store.store_name or "")
+            await ChatSession.get_or_create(
+                id=session_uuid,
+                defaults={"shop_domain": shop_domain, "customer_email": None},
+            )
+            await ChatMessage.create(
+                session_id=session_uuid,
+                role="user",
+                content=message,
+                payload=None,
+            )
+            await ChatMessage.create(
+                session_id=session_uuid,
+                role="assistant",
+                content=result.get("answer") or "",
+                payload={
+                    "general_answer": result.get("answer") or "",
+                    "sources": result.get("sources") or [],
+                    "route": "WEBSITE_QA",
+                },
+            )
+        except Exception as persist_err:
+            print(f"website chat persist skipped: {persist_err}", flush=True)
+        # Keep the existing widget renderer working: it reads final_response.general_answer.
+        result["final_response"] = {
+            "general_answer": result.get("answer") or "",
+            "urls": [],
+            "products": [],
+            "suggested_actions": [],
+            "action": None,
+        }
+        return APIResponse(success=True, message="Website answer", data=result)
+
+    @staticmethod
+    async def website_lead(request, user: dict, http_request: Request):
+        """Persist a lead captured by the website widget."""
+        store = await AppController._website_store_for_user(user)
+        chatbot = None
+        if getattr(store, "chatbot_id", None):
+            chatbot = await chatbot_settings.filter(id=store.chatbot_id).first()
+        origin = (
+            http_request.headers.get("origin")
+            or http_request.headers.get("referer")
+            or ""
+        )
+        allowed = getattr(chatbot, "allowed_url", None) if chatbot else None
+        AppController._enforce_origin(origin, allowed)
+
+        from app.core.services.rate_limit import allow as rate_allow
+
+        forwarded = (http_request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        client_ip = forwarded or (http_request.client.host if http_request.client else "")
+        if not await rate_allow(
+            f"website-lead:{user.get('chatbot_id')}:{client_ip}",
+            limit=max(10, int(getattr(settings, "rate_limit_per_minute", 60) or 60) // 3),
+        ):
+            raise ApplicationError.TooManyRequests()
+
+        email = (getattr(request, "email", None) or "").strip() or None
+        phone = (getattr(request, "phone", None) or "").strip() or None
+        name = (getattr(request, "name", None) or "").strip() or None
+        extra = getattr(request, "extra_fields", None) or {}
+        if not (email or phone or extra):
+            raise ApplicationError.BadRequest("At least one contact field is required")
+
+        consent = bool(getattr(request, "consent", False))
+        lead = await Lead.create(
+            user_id=int(store.user_id),
+            chatbot_id=getattr(store, "chatbot_id", None),
+            store_id=store.id,
+            session_id=(getattr(request, "session_id", None) or "").strip() or None,
+            name=name,
+            email=email,
+            phone=phone,
+            extra_fields=extra if isinstance(extra, dict) else {"value": extra},
+            page_url=(getattr(request, "page_url", None) or "").strip() or None,
+            source=(getattr(request, "source", None) or "inline_form").strip()[:32],
+            consent_text_version=(getattr(request, "consent_text_version", None) or "").strip() or None,
+            consent_at=datetime.now(timezone.utc) if consent else None,
+            conversation_summary=(getattr(request, "conversation_summary", None) or "").strip() or None,
+            status="new",
+        )
+        if email and lead.session_id:
+            try:
+                await ChatSession.filter(id=uuid.UUID(lead.session_id)).update(customer_email=email)
+            except Exception:
+                pass
+        return APIResponse(
+            success=True,
+            message="Lead captured",
+            data={"lead_id": lead.id, "status": lead.status},
+        )
+
+    @staticmethod
+    async def list_leads(user: dict, limit: int = 50, offset: int = 0):
+        qs = Lead.filter(user_id=user["id"])
+        total = await qs.count()
+        rows = await qs.order_by("-created_at").offset(max(0, offset)).limit(min(max(1, limit), 200))
+        return APIResponse(
+            success=True,
+            message="Leads fetched",
+            data={
+                "total": total,
+                "items": [
+                    {
+                        "id": r.id,
+                        "name": r.name,
+                        "email": r.email,
+                        "phone": r.phone,
+                        "session_id": r.session_id,
+                        "page_url": r.page_url,
+                        "source": r.source,
+                        "status": r.status,
+                        "extra_fields": r.extra_fields or {},
+                        "conversation_summary": r.conversation_summary,
+                        "created_at": r.created_at.isoformat() if r.created_at else None,
+                    }
+                    for r in rows
+                ],
+            },
+        )
+
+    @staticmethod
+    async def export_leads(user: dict):
+        rows = await Lead.filter(user_id=user["id"]).order_by("-created_at").limit(5000)
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow([
+            "id", "name", "email", "phone", "session_id", "page_url",
+            "source", "status", "created_at", "conversation_summary",
+        ])
+        for r in rows:
+            writer.writerow([
+                r.id, r.name or "", r.email or "", r.phone or "",
+                r.session_id or "", r.page_url or "", r.source or "",
+                r.status or "", r.created_at.isoformat() if r.created_at else "",
+                (r.conversation_summary or "").replace("\n", " "),
+            ])
+        return Response(
+            content=buffer.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=leads.csv"},
+        )
+
+    # ============================
     # Orchestrator LLM usage persistence (per store + per chat session)
     # ============================
 
@@ -1972,6 +2338,88 @@ class  AppController:
             success=True,
             message="Sync enqueued",
             data={"sync_status": "syncing", "last_synced_at": now.isoformat()},
+        )
+
+    @staticmethod
+    async def get_store_profile(user: dict):
+        """Lightweight store context for store-type-aware admin navigation."""
+        store = await AdminDbContoller().find_first_ecom_store_by_user_id(user["id"])
+        if not store:
+            return APIResponse(
+                success=True,
+                message="No store connected",
+                data={"store_id": None, "store_type": None},
+            )
+        store_type = getattr(store, "store_type", None)
+        return APIResponse(
+            success=True,
+            message="Store profile fetched",
+            data={
+                "store_id": store.id,
+                "chatbot_id": getattr(store, "chatbot_id", None),
+                "store_name": store.store_name,
+                "storefront_url": getattr(store, "storefront_url", None),
+                "store_type": str(getattr(store_type, "value", store_type) or "") or None,
+            },
+        )
+
+    @staticmethod
+    async def get_chatbot_embed(user: dict):
+        """Return the public widget key and a copy-paste embed snippet."""
+        store = (
+            await ecom_store.filter(user_id=user["id"], store_type="website")
+            .order_by("-id")
+            .first()
+        )
+        if store is None:
+            store = await AdminDbContoller().find_first_ecom_store_by_user_id(user["id"])
+        if not store:
+            raise ApplicationError.NotFound("No store found")
+
+        chatbot = None
+        if getattr(store, "chatbot_id", None):
+            chatbot = await chatbot_settings.filter(id=store.chatbot_id).first()
+        if chatbot is None:
+            chatbot = (
+                await chatbot_settings.filter(user_id=user["id"])
+                .order_by("-id")
+                .first()
+            )
+        if chatbot is None:
+            raise ApplicationError.NotFound("No chatbot found")
+
+        custom = await AdminDbContoller().get_chatbot_customization(store.id)
+        bot_name = (getattr(custom, "bot_name", None) or "Chat support").replace('"', "&quot;")
+        store_type = getattr(store, "store_type", None)
+        store_type_value = str(getattr(store_type, "value", store_type) or "").lower()
+        api_path = (
+            "/admin/app/website/chat"
+            if store_type_value == "website"
+            else "/admin/app/orchestrate/chatbot"
+        )
+        api_url = f"{settings.public_api_base_url.rstrip('/')}{api_path}"
+        embed_key = chatbot.api_key or ""
+        snippet = (
+            f'<chatbot-widget\n'
+            f'  data-api-key="{embed_key}"\n'
+            f'  data-api-url="{api_url}"\n'
+            f'  data-header="{bot_name}"\n'
+            f'></chatbot-widget>\n'
+            f'<script type="module" src="{settings.widget_script_url}"></script>'
+        )
+        return APIResponse(
+            success=True,
+            message="Embed settings fetched",
+            data={
+                "store_id": store.id,
+                "chatbot_id": chatbot.id,
+                "store_type": store_type_value or None,
+                "embed_key": embed_key,
+                "api_url": api_url,
+                "widget_script_url": settings.widget_script_url,
+                "allowed_origins": chatbot.allowed_url or [],
+                "snippet": snippet,
+            },
         )
 
     @staticmethod

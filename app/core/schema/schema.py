@@ -172,6 +172,41 @@ class AddComezRequest(BaseModel):
     )
 
 
+class AddWebsiteRequest(BaseModel):
+    """Create a website chatbot (PDF Q&A + lead capture, no ecommerce)."""
+
+    site_name: str = Field(description="Display name of the website / business.")
+    domain: Optional[str] = Field(
+        default=None,
+        description="Primary website URL, e.g. https://acme.com.",
+    )
+    allowed_origins: Optional[List[str]] = Field(
+        default=None,
+        description="Origins allowed to use the embed key, e.g. ['https://acme.com'].",
+    )
+    bot_name: Optional[str] = Field(default=None, description="Optional assistant name.")
+
+
+class WebsiteChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    page_url: Optional[str] = None
+
+
+class WebsiteLeadRequest(BaseModel):
+    session_id: Optional[str] = None
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    message: Optional[str] = None
+    page_url: Optional[str] = None
+    source: str = Field(default="inline_form", description="inline_form | handover | fallback")
+    extra_fields: Dict[str, Any] = Field(default_factory=dict)
+    consent: bool = False
+    consent_text_version: Optional[str] = None
+    conversation_summary: Optional[str] = None
+
+
 class StoreDNA(BaseModel):
     dna_summary: str = Field(description="A concise summary of the store's niche and style.")
     detected_categories: List[str] = Field(

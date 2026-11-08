@@ -20,6 +20,7 @@ class ecom_store_type(str, Enum):
     shopify = "shopify"
     comez = "comez"
     custom = "custom"
+    website = "website"
 
 class subscription_type(str, Enum):
     monthly = "monthly"
@@ -545,4 +546,37 @@ class TicketsRaised(Model):
             ("chatbot_id",),
             ("ticket_id",),
             ("ticket_status", "ticket_created_at", "ticket_updated_at"),
+        ]
+
+
+class Lead(Model):
+    """Lead captured by a website chatbot (PDF Q&A / handover flow)."""
+
+    id = fields.BigIntField(pk=True)
+    user_id = fields.IntField(index=True)
+    chatbot_id = fields.IntField(null=True, index=True)
+    store_id = fields.IntField(null=True, index=True)
+    session_id = fields.CharField(max_length=255, null=True)
+    name = fields.CharField(max_length=255, null=True)
+    email = fields.CharField(max_length=255, null=True)
+    phone = fields.CharField(max_length=64, null=True)
+    extra_fields = fields.JSONField(default=dict)
+    page_url = fields.TextField(null=True)
+    source = fields.CharField(max_length=32, default="inline_form")
+    consent_text_version = fields.CharField(max_length=64, null=True)
+    consent_at = fields.DatetimeField(null=True)
+    conversation_summary = fields.TextField(null=True)
+    status = fields.CharField(max_length=20, default="new")
+    created_at = fields.DatetimeField(auto_now_add=True)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "leads"
+        indexes = [
+            ("user_id",),
+            ("chatbot_id",),
+            ("store_id",),
+            ("session_id",),
+            ("status",),
+            ("created_at",),
         ]

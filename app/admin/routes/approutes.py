@@ -9,6 +9,7 @@ from app.core.schema.schema import (
     ChatbotCustomizationResponse, ChatbotCustomizationUpdate, KnowledgeSummary,
     AddToCartTrackRequest, DemoLeadRequest,
     CreateTicketRequest, UpdateTicketStatusRequest,
+    AddWebsiteRequest, WebsiteChatRequest, WebsiteLeadRequest,
 )
 from app.core.schema.schema import llmrequest, llmresponse
 from app.core.services.first_conversation import generate_first_conversation_greeting
@@ -324,10 +325,11 @@ async def upload_files(
     user: dict = Depends(AppController.validate_user),
     file_path: Optional[List[dict]] = Depends(get_uploaded_files),
     name: str = Form(...),
-    urls: Optional[str] = Form(None)
+    urls: Optional[str] = Form(None),
+    chatbot_id: Optional[int] = Form(None),
 ): 
     request = UploadKnowledgeBaseRequest.as_form(
-        chatbot_id=None,
+        chatbot_id=chatbot_id,
         name=name,
         urls=urls
     )
@@ -517,6 +519,15 @@ async def process_orchestrate_chatbot(
     if store is None and user.get("id"):
         store = await AdminDbContoller().find_first_ecom_store_by_user_id(user["id"])
 
+    store_type = str(
+        getattr(getattr(store, "store_type", None), "value", getattr(store, "store_type", ""))
+        or ""
+    ).lower()
+    if store_type == "website":
+        raise ApplicationError.BadRequest(
+            "This is a website chatbot. Use /admin/app/website/chat for document Q&A."
+        )
+
     # Fetch the session to check for prefetched cache
     session = await ChatSession.filter(id=session_uuid).first()
     
@@ -698,6 +709,58 @@ async def addshoppify(request:AddshopifyRequest,user:dict = Depends(AppControlle
 async def addcomez(request: AddComezRequest, user: dict = Depends(AppController.validate_user)):
     """Connect a Comez store (JWT + storefront URL + storename / x-store / custom_domain). No OAuth redirect."""
     return await AppController.addcomez(request, user)
+
+@adminapprouter.get("/store-profile", response_model=APIResponse)
+async def get_store_profile(user: dict = Depends(AppController.validate_user)):
+    """Store type + identity used to gate the admin panel by store mode."""
+    return await AppController.get_store_profile(user)
+
+@adminapprouter.get("/chatbot/embed", response_model=APIResponse)
+async def get_chatbot_embed(user: dict = Depends(AppController.validate_user)):
+    """Public widget key + copy-paste embed snippet for the merchant dashboard."""
+    return await AppController.get_chatbot_embed(user)
+
+@adminapprouter.post("/addwebsite", response_model=APIResponse)
+async def add_website(request: AddWebsiteRequest, user: dict = Depends(AppController.validate_user)):
+    """Create a website chatbot (PDF Q&A + lead capture, no ecommerce)."""
+    return await AppController.add_website(request, user)
+
+
+@adminapprouter.post("/website/chat", response_model=APIResponse)
+async def website_chat(
+    request: WebsiteChatRequest,
+    http_request: Request,
+    user: dict = Depends(AppController.validate_chatbot_api_key),
+):
+    """Website widget: grounded document Q&A only."""
+    return await AppController.website_chat(request, user, http_request)
+
+
+@adminapprouter.post("/website/lead", response_model=APIResponse)
+async def website_lead(
+    request: WebsiteLeadRequest,
+    http_request: Request,
+    user: dict = Depends(AppController.validate_chatbot_api_key),
+):
+    """Website widget: persist a lead."""
+    return await AppController.website_lead(request, user, http_request)
+
+
+@adminapprouter.post("/website/sync_session", response_model=APIResponse)
+async def website_sync_session(
+    user: dict = Depends(AppController.validate_chatbot_api_key),
+):
+    """Widget compatibility: website mode is stateless, so acknowledge syncs."""
+    return APIResponse(success=True, message="Session synced", data={})
+
+
+@adminapprouter.post("/website/summarize_session", response_model=APIResponse)
+async def website_summarize_session(
+    user: dict = Depends(AppController.validate_chatbot_api_key),
+):
+    """Widget compatibility: no server-side transcript is stored for website mode."""
+    return APIResponse(success=True, message="Session summarized", data={})
+
 
 @adminapprouter.get("/chatbot/customization", response_model=APIResponse)
 async def get_chatbot_customization(user: dict = Depends(AppController.validate_user)):

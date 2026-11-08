@@ -80,3 +80,11 @@ class ApplicationError(Exception):
             message=resourse if resourse else "ServiceUnavailable",
             status_code=503
         )
+
+    @classmethod
+    def TooManyRequests(cls, resourse: str | None = None):
+        return cls(
+            type="TooManyRequests",
+            message=resourse or "Too many requests. Please try again shortly.",
+            status_code=429,
+        )

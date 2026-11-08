@@ -891,6 +891,8 @@ class AdminDbContoller:
         if not store:
             return {
                 "store_id": None,
+                "store_type": None,
+                "leads_captured": 0,
                 "add_to_cart_clicks": 0,
                 "attributed_revenue": 0.0,
                 "currency": "INR",
@@ -913,6 +915,15 @@ class AdminDbContoller:
             }
 
         store_id = store.id
+        store_type_value = str(
+            getattr(getattr(store, "store_type", None), "value", getattr(store, "store_type", ""))
+            or ""
+        ).lower()
+        leads_captured = 0
+        try:
+            leads_captured = await self.models.Lead.filter(store_id=store_id).count()
+        except Exception:
+            leads_captured = 0
         shop_domain = self._normalize_shop_domain(store.store_name or "")
 
         atc_qs = self.models.AddToCartEvent.filter(store_id=store_id)
@@ -962,6 +973,8 @@ class AdminDbContoller:
 
         return {
             "store_id": store_id,
+            "store_type": store_type_value or None,
+            "leads_captured": leads_captured,
             "add_to_cart_clicks": add_to_cart_clicks,
             "attributed_revenue": attributed_revenue,
             "currency": "INR",

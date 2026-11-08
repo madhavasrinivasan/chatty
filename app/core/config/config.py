@@ -17,6 +17,9 @@ class Settings(BaseSettings):
 
     # API Key
     api_key_header: str = "x-api-key"
+    # Public URLs used to build the copy-paste embed snippet in the admin panel.
+    public_api_base_url: str = Field(default="https://api.symma.shop")
+    widget_script_url: str = Field(default="https://widget.symma.shop/chatbot.js")
 
     # File Upload
     file_upload_directory_pdf: str = Field(default="Assets/PDF")

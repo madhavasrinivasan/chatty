@@ -36,6 +36,20 @@ async def set_session_handover(
     return await AppController.set_session_needs_human(user, session_id, payload.needs_human)
 
 
+@approuter.get("/leads", response_model=APIResponse)
+async def list_leads(
+    limit: int = 50,
+    offset: int = 0,
+    user: dict = Depends(AppController.validate_user),
+):
+    return await AppController.list_leads(user, limit=limit, offset=offset)
+
+
+@approuter.get("/leads/export")
+async def export_leads(user: dict = Depends(AppController.validate_user)):
+    return await AppController.export_leads(user)
+
+
 @approuter.get("/sync-status", response_model=APIResponse)
 async def get_sync_status(user: dict = Depends(AppController.validate_user)):
     return await AppController.get_sync_status(user)
