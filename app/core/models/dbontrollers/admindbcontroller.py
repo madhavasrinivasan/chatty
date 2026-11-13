@@ -517,6 +517,12 @@ class AdminDbContoller:
                 image_url = EXCLUDED.image_url,
                 variant_data = EXCLUDED.variant_data,
                 embedding = EXCLUDED.embedding,
+                -- Re-embed the new image lazily when the product image changes.
+                image_embedding = CASE
+                    WHEN store_knowledge.image_url IS DISTINCT FROM EXCLUDED.image_url
+                    THEN NULL
+                    ELSE store_knowledge.image_embedding
+                END,
                 content_hash = EXCLUDED.content_hash,
                 product_type = EXCLUDED.product_type,
                 data_type = EXCLUDED.data_type,
@@ -612,6 +618,55 @@ class AdminDbContoller:
         except Exception as e:
             print(f"Error insert_store_knowledge_raw: {e}")
             raise ApplicationError.InternalServerError("Cannot insert store_knowledge")
+
+    async def fetch_products_missing_image_embedding(
+        self, store_id: int, limit: int = 100
+    ) -> list[dict]:
+        """Products with an image but no visual embedding yet."""
+        rows = await self.connection.execute_query_dict(
+            """
+            SELECT id, title, image_url
+            FROM store_knowledge
+            WHERE store_id = $1
+              AND data_type = 'product'
+              AND image_url IS NOT NULL
+              AND image_url <> ''
+              AND image_embedding IS NULL
+            ORDER BY id
+            LIMIT $2
+            """,
+            [store_id, max(1, min(int(limit), 1000))],
+        )
+        return [dict(r) for r in rows] if rows else []
+
+    async def update_product_image_embedding(
+        self, row_id: int, embedding: list[float]
+    ) -> None:
+        if not embedding:
+            return
+        await self.connection.execute_query(
+            """
+            UPDATE store_knowledge
+            SET image_embedding = $1::vector
+            WHERE id = $2
+            """,
+            [json.dumps(list(embedding)), row_id],
+        )
+
+    async def count_products_missing_image_embedding(self, store_id: int) -> int:
+        rows = await self.connection.execute_query_dict(
+            """
+            SELECT COUNT(*)::int AS count
+            FROM store_knowledge
+            WHERE store_id = $1
+              AND data_type = 'product'
+              AND image_url IS NOT NULL
+              AND image_url <> ''
+              AND image_embedding IS NULL
+            """,
+            [store_id],
+        )
+        return int(rows[0]["count"]) if rows else 0
 
     # ============================
     # store_knowledge: raw rows for metrics (no HTTP / billing shape here)

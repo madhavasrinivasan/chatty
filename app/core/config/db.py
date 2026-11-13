@@ -224,12 +224,20 @@ async def _upgrade_store_knowledge_vector_search():
         """)
         await conn.execute_query("""
             ALTER TABLE store_knowledge
+            ADD COLUMN IF NOT EXISTS image_embedding vector(768);
+        """)
+        await conn.execute_query("""
+            ALTER TABLE store_knowledge
             ADD COLUMN IF NOT EXISTS content_tsv tsvector
             GENERATED ALWAYS AS (to_tsvector('english', coalesce(content, ''))) STORED;
         """)
         await conn.execute_query("""
             CREATE INDEX IF NOT EXISTS idx_store_knowledge_vector_search
             ON store_knowledge USING hnsw (embedding vector_cosine_ops);
+        """)
+        await conn.execute_query("""
+            CREATE INDEX IF NOT EXISTS idx_store_knowledge_image_vector_search
+            ON store_knowledge USING hnsw (image_embedding vector_cosine_ops);
         """)
         await conn.execute_query("""
             CREATE INDEX IF NOT EXISTS idx_store_knowledge_keyword_search

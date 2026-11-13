@@ -710,6 +710,14 @@ async def addcomez(request: AddComezRequest, user: dict = Depends(AppController.
     """Connect a Comez store (JWT + storefront URL + storename / x-store / custom_domain). No OAuth redirect."""
     return await AppController.addcomez(request, user)
 
+@adminapprouter.post("/store/image-embeddings", response_model=APIResponse)
+async def backfill_store_image_embeddings(
+    limit: int = 100,
+    user: dict = Depends(AppController.validate_user),
+):
+    """Backfill visual embeddings for existing products (safe to re-run)."""
+    return await AppController.backfill_store_image_embeddings(user, limit=limit)
+
 @adminapprouter.get("/store-profile", response_model=APIResponse)
 async def get_store_profile(user: dict = Depends(AppController.validate_user)):
     """Store type + identity used to gate the admin panel by store mode."""

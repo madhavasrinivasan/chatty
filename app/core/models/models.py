@@ -40,6 +40,7 @@ class background_task_status(str, Enum):
 
 class background_task_type(str, Enum):
     create_vectors = "create_vectors"
+    create_image_embeddings = "create_image_embeddings"
     get_products = "get_products"
     get_orders = "get_orders"
     query_expander_context = "query_expander_context"

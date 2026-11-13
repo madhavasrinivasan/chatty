@@ -12,6 +12,7 @@ from typing import Any
 
 from tortoise import connections
 
+from app.core.config.config import settings
 from app.core.services.webcrawler import Services
 
 
@@ -305,6 +306,7 @@ def _build_path_b_sql(
     sort_order: str | None,
     limit: int,
     data_types_sql: str = _SEARCH_TYPES_SQL,
+    use_image: bool = False,
 ) -> tuple[str, list[Any]]:
     """Path B: RRF hybrid with dynamic sorting."""
     params: list[Any] = [store_id, vector_json]
@@ -332,6 +334,7 @@ def _build_path_b_sql(
         keyword_cte = f"""
     keyword_search AS (
         SELECT id, title, content, price, url, image_url, data_type,
+               TRUE AS keyword_match,
                ROW_NUMBER() OVER (ORDER BY ts_rank(to_tsvector('english', title || ' ' || coalesce(content, '')), websearch_to_tsquery('english', ${keyword_param_pos})) DESC) as rank_k
         FROM store_knowledge
         WHERE store_id = $1
@@ -343,11 +346,13 @@ def _build_path_b_sql(
     else:
         keyword_cte = """
     keyword_search AS (
-        SELECT id, title, content, price, url, image_url, NULL::text as data_type, 0::integer as rank_k
+        SELECT id, title, content, price, url, image_url, NULL::text as data_type,
+               FALSE AS keyword_match, 0::integer as rank_k
         FROM store_knowledge
         WHERE 1 = 0
     )"""
 
+    vector_expr = "COALESCE(image_embedding, embedding)" if use_image else "embedding"
     final_score_expr = f"( COALESCE(${vector_w_pos} * (1.0 / (60 + v.rank_v)), 0.0) + COALESCE(${keyword_w_pos} * (1.0 / (60 + k.rank_k)), 0.0) )"
 
     # --- NEW DYNAMIC SORTING LOGIC ---
@@ -371,13 +376,14 @@ def _build_path_b_sql(
     WITH
     vector_search AS (
         SELECT id, title, content, price, url, image_url, data_type,
-               ROW_NUMBER() OVER (ORDER BY embedding <=> $2::vector) as rank_v
+               ({vector_expr} <=> $2::vector) AS vector_distance,
+               ROW_NUMBER() OVER (ORDER BY {vector_expr} <=> $2::vector) as rank_v
         FROM store_knowledge
         WHERE store_id = $1
           AND data_type IN ({data_types_sql})
-          AND embedding IS NOT NULL
+          AND {vector_expr} IS NOT NULL
           {filter_sql}
-        ORDER BY embedding <=> $2::vector
+        ORDER BY {vector_expr} <=> $2::vector
         LIMIT 40
     ),
     {keyword_cte}
@@ -389,6 +395,8 @@ def _build_path_b_sql(
         COALESCE(v.url, k.url) as url,
         COALESCE(v.image_url, k.image_url) as image_url,
         COALESCE(v.data_type, k.data_type) as data_type,
+        COALESCE(v.vector_distance, 1.0) as vector_distance,
+        COALESCE(k.keyword_match, FALSE) as keyword_match,
         {final_score_expr} as final_score
     FROM vector_search v
     FULL OUTER JOIN keyword_search k ON v.id = k.id
@@ -397,6 +405,42 @@ def _build_path_b_sql(
     """
     
     return sql, params
+
+def _apply_relevance_guard(
+    rows: list[dict[str, Any]],
+    *,
+    keyword_weight: float,
+    has_image: bool,
+) -> list[dict[str, Any]]:
+    """Drop weak vector-only matches so an absent category returns no products.
+
+    Keyword-matched rows are always kept. For vector-only rows we require a
+    minimum cosine similarity; vibe/abstract queries get a slightly looser
+    threshold than exact noun queries. Image search is not filtered.
+    """
+    if not rows or has_image:
+        return rows
+    base = float(getattr(settings, "semantic_min_similarity", 0.65) or 0.65)
+    threshold = base if keyword_weight >= 0.55 else max(0.5, base - 0.1)
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("keyword_match"):
+            kept.append(row)
+            continue
+        try:
+            similarity = 1.0 - float(row.get("vector_distance", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            similarity = 0.0
+        if similarity >= threshold:
+            kept.append(row)
+    if len(kept) != len(rows):
+        print(
+            f"DatabaseExecutor relevance guard: {len(rows)} → {len(kept)} rows "
+            f"(vector-only threshold={threshold:.2f})",
+            flush=True,
+        )
+    return kept
+
 
 class DatabaseExecutor:
     """Executes search against store_knowledge from QueryExpander payload."""
@@ -448,6 +492,9 @@ class DatabaseExecutor:
                 print(f"⚠️ Failed decoding query_image_base64: {b64_err}", flush=True)
 
         has_image = bool(query_image_bytes or query_image_url)
+        if has_image:
+            # Visual search needs a shortlist for near-duplicate apparel.
+            limit = max(limit, 8)
 
         conn = connections.get("default")
 
@@ -580,6 +627,7 @@ class DatabaseExecutor:
                 sort_order,
                 limit,
                 data_types_sql=data_types_sql,
+                use_image=has_image,
             )
             rows = await conn.execute_query_dict(sql, params)
             return [dict(r) for r in rows] if rows else []
@@ -604,7 +652,11 @@ class DatabaseExecutor:
                         f"DatabaseExecutor Branch C loosened kw={loose!r} → {len(rows)} rows",
                         flush=True,
                     )
-            return rows
+            return _apply_relevance_guard(
+                rows,
+                keyword_weight=keyword_weight,
+                has_image=has_image,
+            )
         except Exception as e:
             print(f"DatabaseExecutor Branch C (hybrid) error: {e}", flush=True)
             return []

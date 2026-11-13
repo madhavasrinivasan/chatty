@@ -73,6 +73,18 @@ class Settings(BaseSettings):
     jev_router_timeout_s: float = Field(default=8.0)
     # Noul threshold: run Gemini QueryExpander after Jev product route
     jev_needs_expander_threshold: float = Field(default=0.55)
+    # Minimum cosine similarity for vector-only catalog results. Prevents
+    # unrelated products (e.g. diapers for a "cars" query) when keyword search
+    # finds nothing. Keyword-matched rows bypass this threshold.
+    semantic_min_similarity: float = Field(default=0.65)
+    # Product image embeddings (visual search). Backfilled after catalog sync.
+    image_embedding_enabled: bool = Field(default=True)
+    image_embedding_concurrency: int = Field(default=3)
+    image_embedding_batch_size: int = Field(default=100)
+    # Vision rerank of visual-search candidates (top image-embedding hits).
+    image_rerank_enabled: bool = Field(default=True)
+    image_rerank_candidates: int = Field(default=8)
+    image_rerank_top_k: int = Field(default=5)
     # Re-rank DB shortlist with Noul before Gemini synthesis (disabled — latency without gain)
     jev_rerank_enabled: bool = Field(default=False)
     jev_rerank_top_k: int = Field(default=8)

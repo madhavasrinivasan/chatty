@@ -343,11 +343,12 @@ def _build_expander_prompt(
 {memory_block}{history_block}{discounts_block}{instruction}Analyze the user's message to extract the core search intent, implied filters, sorting preferences, and the optimal Reciprocal Rank Fusion (RRF) weights.
 
 CRITICAL RULES FOR PRODUCT QUERIES:
-1. PRESERVE MODIFIERS: DO NOT drop important adjectives, colors, shapes, or specific identifiers from the keywords. 
-2. MULTIPLE ITEMS: If the user asks for multiple distinct items, you MUST separate the distinct items with the exact string " OR " in `search_keywords` (e.g., "cloth diaper pack OR green kitty grooming kit"). You MUST classify this as EXACT/SPECIFIC (keyword_weight: 0.8).
-3. CONCENTRATED SEMANTICS: `semantic_context` MUST ALWAYS contain the positive, underlying concepts of the product. It must be a comma-separated list of abstract concepts, vibes, or generic product types (e.g., "baby blanket, receiving blanket, newborn comfort"). NEVER LEAVE THIS BLANK, even if using exclusions.
-4. EXTRACTING FILTERS: Only put colors/sizes into `filters` if they are generic variants. 
-5. EXCLUSIONS (NEGATIVE SEARCH): If the user says they do NOT want something (e.g. "no cars"), OR if USER FACTS indicate a dislike, append the excluded words to `search_keywords` with a minus sign (e.g. "muslin receiving blanket -car -vehicle"). CRITICAL: The `semantic_context` MUST still contain the positive concepts (e.g., "baby blanket, nursery") so the vector search knows what to look for!
+1. PRESERVE MODIFIERS: DO NOT drop important adjectives, colors, shapes, or specific identifiers from the keywords.
+2. NEVER SUBSTITUTE A DIFFERENT PRODUCT CATEGORY. If the user asks for "cars" and the store DNA is baby products, keep "cars" or "car toys" in search_keywords and semantic_context. Do NOT translate the request into baby diapers, blankets, or another store category. If the store does not sell the requested category, the correct outcome is no matching products, not an unrelated recommendation.
+3. MULTIPLE ITEMS: If the user asks for multiple distinct items, you MUST separate the distinct items with the exact string " OR " in `search_keywords` (e.g., "cloth diaper pack OR green kitty grooming kit"). You MUST classify this as EXACT/SPECIFIC (keyword_weight: 0.8).
+4. CONCENTRATED SEMANTICS: `semantic_context` MUST ALWAYS contain the positive, underlying concepts of the product. It must be a comma-separated list of abstract concepts, vibes, or generic product types (e.g., "baby blanket, receiving blanket, newborn comfort"). NEVER LEAVE THIS BLANK, even if using exclusions.
+5. EXTRACTING FILTERS: Only put colors/sizes into `filters` if they are generic variants. 
+6. EXCLUSIONS (NEGATIVE SEARCH): If the user says they do NOT want something (e.g. "no cars"), OR if USER FACTS indicate a dislike, append the excluded words to `search_keywords` with a minus sign (e.g. "muslin receiving blanket -car -vehicle"). CRITICAL: The `semantic_context` MUST still contain the positive concepts (e.g., "baby blanket, nursery") so the vector search knows what to look for!
 
 CRITICAL RULES FOR NON-PRODUCT QUERIES (Policies, FAQs, About Us):
 - If the user asks about the store in general: Set search_keywords to "about us, our story". Set semantic_context to "brand mission, history".

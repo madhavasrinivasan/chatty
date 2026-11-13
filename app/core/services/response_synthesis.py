@@ -56,6 +56,7 @@ def _results_index(hybrid_results: list[dict[str, Any]] | None) -> list[dict[str
                 "price": r.get("price"),
                 "url": r.get("url"),
                 "image_url": r.get("image_url"),
+                "data_type": r.get("data_type"),
                 "discount_info": r.get("discount_info"),
                 "handle": r.get("handle"),
             }
@@ -112,23 +113,67 @@ def _backfill_selected_products_from_answer(
     return existing
 
 
-def _filter_product_image_urls(urls: list[Any], results: list[dict[str, Any]]) -> list[str]:
-    """Drop product CDN/image URLs mistakenly put in `urls` (those belong on cards)."""
+def _normalize_link(value: str) -> str:
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    if s.startswith("file://"):
+        return ""
+    return s.rstrip("/").lower()
+
+
+def _filter_allowed_urls(
+    urls: list[Any],
+    results: list[dict[str, Any]],
+    extra_results: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """Keep only page/policy/collection links that actually exist in the store data.
+
+    The LLM previously invented plausible-looking URLs. We now allow only URLs
+    present on non-product knowledge rows (page/policy/collection/custom), never
+    product image CDN URLs, and never a hallucinated path.
+    """
     image_set = {
         str(r.get("image_url") or "").strip().lower()
         for r in results
         if r.get("image_url")
     }
+    allowed: set[str] = set()
+    # Catalog rows are product-first; only allow their page/collection URLs.
+    for row in results or []:
+        if not isinstance(row, dict):
+            continue
+        data_type = str(row.get("data_type") or "").lower()
+        if data_type not in ("page", "policy", "collect", "custom"):
+            continue
+        normalized = _normalize_link(row.get("url") or "")
+        if normalized:
+            allowed.add(normalized)
+    # Knowledge rows are non-product by construction.
+    for row in extra_results or []:
+        if not isinstance(row, dict):
+            continue
+        normalized = _normalize_link(row.get("url") or "")
+        if normalized:
+            allowed.add(normalized)
+
     cleaned: list[str] = []
+    seen: set[str] = set()
     for u in urls or []:
         s = str(u or "").strip()
         if not s:
+            continue
+        normalized = _normalize_link(s)
+        if not normalized or normalized in seen:
             continue
         low = s.lower()
         if low in image_set:
             continue
         if any(ext in low for ext in (".png", ".jpg", ".jpeg", ".webp", ".gif")) and "/images/" in low:
             continue
+        if not any(normalized == a or normalized.endswith(a) for a in allowed):
+            continue
+        seen.add(normalized)
         cleaned.append(s)
     return cleaned
 
@@ -454,6 +499,7 @@ async def generate_final_response(
     active_chat_history: list[dict[str, Any]] | None = None,
     cart_items: list[dict[str, Any]] | None = None,
     knowledge_results: list[dict[str, Any]] | None = None,
+    visual_search: bool = False,
     thinking_budget: int | None = None,
     system_prompt_override: str | None = None,
 ) -> tuple[FinalFrontendResponse, dict[str, dict[str, int]]]:
@@ -561,8 +607,25 @@ async def generate_final_response(
         "   - When adding an item, confirm enthusiastically in general_answer: 'I've added the <Product Name> to your cart!'\n"
         "9. PRODUCT CARDS ARE MANDATORY WHEN YOU RECOMMEND. If you name, recommend, or quote a price for any product from "
         "the search results, you MUST include that product in selected_products using the exact `id` field from the results "
-        "(string). Never put product image_url values into urls; urls is only for policy/sizing/collection page links.\n\n"
+        "(string). Never put product image_url values into urls; urls is only for policy/sizing/collection page links.\n"
+        "10. NO UNRELATED PRODUCTS. If the catalog results are empty, or none of the results match the requested product "
+        "category, do NOT recommend a different category just to fill the answer. Say clearly that you could not find "
+        "matching products and offer to check another category. Never turn a request for cars into baby products, "
+        "or a request for a specific item into unrelated inventory.\n"
+        "11. URLS MUST COME FROM CONTEXT. Only include policy/sizing/collection URLs that appear verbatim in the provided "
+        "context. Never invent, guess, shorten, or construct a URL.\n"
     )
+    if visual_search:
+        instruction += (
+            "12. VISUAL SEARCH — MULTIPLE CANDIDATES. The shopper uploaded a photo. "
+            "Do NOT claim an exact match. Present the top 3 to 5 closest visual matches, "
+            "prefer different colors/styles when the catalog has near-duplicates, briefly "
+            "explain what matches (category, color, pattern, silhouette), and ask which one "
+            "they meant. If all matches are weak, say so clearly. Include 3-5 products in "
+            "selected_products when available.\n\n"
+        )
+    else:
+        instruction += "\n"
     if system_prompt_override and system_prompt_override.strip():
         instruction += f"MERCHANT STORE CUSTOM RULES & INSTRUCTIONS (strictly respect and adhere to these guidelines):\n{system_prompt_override.strip()}\n\n"
 
@@ -644,7 +707,11 @@ Output ONLY valid JSON, no markdown code block.
         data = json.loads(raw)
         llm_output = LLMSynthesisOutput(
             general_answer=data.get("general_answer", ""),
-            urls=_filter_product_image_urls(data.get("urls") or [], indexed),
+            urls=_filter_allowed_urls(
+                data.get("urls") or [],
+                indexed,
+                knowledge_results,
+            ),
             selected_products=data.get("selected_products") or [],
             suggested_actions=data.get("suggested_actions") or [],
             action=data.get("action"),

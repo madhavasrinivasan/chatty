@@ -83,6 +83,37 @@ async def _process_one_task(controller: AdminDbContoller, task):
                 Models.background_task_status.failed,
                 str(e),
             )
+    elif task.task_type == "create_image_embeddings":
+        print(f"Processing create_image_embeddings task {task.id}")
+        await controller.update_background_task_status(
+            task.id,
+            Models.background_task_status.running,
+        )
+        try:
+            task_data = task.task_data or {}
+            store_id = int(task_data.get("store_id") or task.user_id)
+            for batch in range(20):
+                result = await AppController.backfill_product_image_embeddings(
+                    store_id, limit=100
+                )
+                print(
+                    f"Image embedding batch {batch + 1}: {result}",
+                    flush=True,
+                )
+                if not result.get("remaining") or not result.get("processed"):
+                    break
+            await controller.update_background_task_status(
+                task.id,
+                Models.background_task_status.completed,
+            )
+            print(f"Task {task.id} (create_image_embeddings) completed successfully")
+        except Exception as e:
+            print(f"Error processing task {task.id}: {e}")
+            await controller.update_background_task_status(
+                task.id,
+                Models.background_task_status.failed,
+                str(e),
+            )
     elif task.task_type == "get_products":
         print(f"Processing get_products task {task.id}")
         await controller.update_background_task_status(
